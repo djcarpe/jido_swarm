@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jido-swarm
+  namespace: jido-swarm
+  labels:
+    app.kubernetes.io/name: jido-swarm
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jido-swarm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jido-swarm
+    spec:
+      containers:
+        - name: jido-swarm
+          # Resolved by the nodes' DNS, not by cluster DNS — containerd pulls
+          # before any pod exists, so a *.svc.cluster.local reference cannot work.
+          image: harbor.home/library/jido-swarm:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 4000
+          envFrom:
+            - configMapRef:
+                name: jido-swarm
+            - secretRef:
+                name: jido-swarm
+          env:
+            # Each pod is one origin in the context mesh. Two graphs sharing an
+            # origin would tie in the last-writer-wins ordering and diverge, so
+            # this must be unique and stable for the pod's life — which is
+            # exactly what the pod name is.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Lets the replicas find each other and form a BEAM cluster, so the
+            # mesh's `:pg` transport propagates deltas between them instantly
+            # and the S3 topic log is only the durable fallback.
+            - name: DNS_CLUSTER_QUERY
+              value: jido-swarm-headless.jido-swarm.svc.cluster.local
+            - name: RELEASE_DISTRIBUTION
+              value: name
+            - name: RELEASE_NODE
+              value: jido_swarm@$(POD_IP)
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          volumeMounts:
+            - name: workspace
+              mountPath: /var/lib/jido_swarm
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              # Cloning three repositories and running their test suites is the
+              # memory-hungry part, not the graph.
+              memory: 3Gi
+      volumes:
+        # Clones and the graph file are a cache, not a system of record — the
+        # knowledge that matters is replicated through the mesh and snapshotted
+        # to S3. emptyDir keeps rescheduling cheap and avoids a PVC per replica.
+        - name: workspace
+          emptyDir:
+            sizeLimit: 8Gi

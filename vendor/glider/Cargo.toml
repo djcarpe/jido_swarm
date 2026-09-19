@@ -1,0 +1,62 @@
+[workspace]
+members = ["bench"]
+
+# Metadata every crate in the workspace inherits with `field.workspace = true`,
+# so version and licence live in exactly one place.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dj/glider"
+authors = ["DJ Carpenter"]
+
+[package]
+name = "glider"
+description = "An embeddable, single-binary property-graph database with built-in graph algorithms"
+readme = "README.md"
+keywords = ["graph", "database", "embedded", "cypher", "graph-algorithms"]
+categories = ["database-implementations", "data-structures", "algorithms"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "glider"
+path = "src/lib.rs"
+# rlib for Rust callers, staticlib for iOS, cdylib for Android/desktop FFI.
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "glider"
+path = "src/main.rs"
+
+[[bin]]
+name = "glider-stream"
+path = "src/bin/glider-stream.rs"
+
+# No dependencies. std only. That is the whole portability story:
+# anything rustc targets, this builds for, with no C toolchain.
+[dependencies]
+
+[lints]
+workspace = true
+
+[workspace.lints.rust]
+# Becomes the default in edition 2024; turning it on now keeps the FFI layer
+# explicit about which operations are the unsafe ones.
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# NOT panic = "abort": the C ABI layer catches panics and returns them as
+# errors, which needs unwinding. A database bug must not kill the host app.
+strip = true

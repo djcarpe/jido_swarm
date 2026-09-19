@@ -1,0 +1,43 @@
+# Reaches the Ollama server on the workstation from inside the cluster.
+#
+# The workstation is not a cluster node, so there is no pod to select. A Service
+# with no selector plus hand-managed Endpoints is the standard way to name an
+# off-cluster address as an in-cluster Service — the same shape the existing
+# `hermes-external` Service in the default namespace already uses.
+#
+# Ollama must be listening on the LAN for this to resolve. By default it binds
+# 127.0.0.1 only:
+#
+#   sudo mkdir -p /etc/systemd/system/ollama.service.d
+#   printf '[Service]\nEnvironment="OLLAMA_HOST=0.0.0.0:11434"\n' \
+#     | sudo tee /etc/systemd/system/ollama.service.d/10-lan-bind.conf
+#   sudo systemctl daemon-reload && sudo systemctl restart ollama
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama-external
+  namespace: jido-swarm
+  labels:
+    app.kubernetes.io/name: ollama-external
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 11434
+      targetPort: 11434
+      protocol: TCP
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: ollama-external
+  namespace: jido-swarm
+  labels:
+    app.kubernetes.io/name: ollama-external
+subsets:
+  - addresses:
+      - ip: 192.168.1.207
+    ports:
+      - name: http
+        port: 11434
+        protocol: TCP

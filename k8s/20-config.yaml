@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jido-swarm
+  namespace: jido-swarm
+data:
+  PHX_HOST: "swarm.home"
+  PORT: "4000"
+
+  # The local model, reached through the ollama-external Service.
+  LLM_PROVIDER: "ollama"
+  OLLAMA_BASE_URL: "http://ollama-external.jido-swarm.svc.cluster.local:11434"
+  OLLAMA_MODEL: "qwen3:4b-instruct"
+  # Ollama defaults to a 4096-token window regardless of what the model
+  # supports, which is smaller than the swarm's prompts.
+  OLLAMA_NUM_CTX: "16384"
+
+  # Claude, once a key exists. Switch LLM_PROVIDER to "anthropic" and nothing
+  # else has to change.
+  ANTHROPIC_MODEL: "claude-opus-5"
+
+  # The elastic pool. Two replicas each scaling to 4 gives the cluster up to
+  # eight concurrent workers against one workstation GPU, which is already more
+  # concurrency than a 4B model repays.
+  SWARM_MIN_WORKERS: "1"
+  SWARM_MAX_WORKERS: "4"
+  SWARM_SCALE_STEP: "2"
+  SWARM_IDLE_TTL_MS: "60000"
+
+  # Where clones and the graph live inside the pod.
+  SWARM_WORKSPACE: "/var/lib/jido_swarm/repos"
+  SWARM_GRAPH_PATH: "/var/lib/jido_swarm/graph/swarm.gldb"
+  SWARM_SNAPSHOT_EVERY: "25"
+
+  # The knowledge mesh's durable half. Left off until credentials for the
+  # cluster's S3 service are in the Secret: without them every snapshot and
+  # topic-log write fails, which is noisier than simply not replicating that
+  # way. With `:pg` alone the replicas still share everything they learn while
+  # they are both up — the object store is what lets a *restarted* pod, or one
+  # that was not running at the time, catch up.
+  #
+  # To turn it on: add AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY to the Secret
+  # and uncomment these.
+  #
+  # SWARM_S3_BUCKET: "jido-swarm"
+  # SWARM_S3_PREFIX: "mesh"
+  # SWARM_S3_ENDPOINT: "http://s3.storage.svc.cluster.local:9000"
+  # AWS_REGION: "us-east-1"

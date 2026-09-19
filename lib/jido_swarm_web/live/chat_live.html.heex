@@ -1,0 +1,228 @@
+<Layouts.flash_group flash={@flash} />
+
+<div class="min-h-screen bg-base-200">
+  <header class="navbar bg-base-100 border-b border-base-300 px-4">
+    <div class="flex-1 gap-3">
+      <span class="text-lg font-semibold">Jido Swarm</span>
+      <span class="badge badge-sm badge-outline">
+        {length(@status.workers)} worker{if length(@status.workers) == 1, do: "", else: "s"}
+      </span>
+      <span :if={@status.queue.pending > 0} class="badge badge-sm badge-warning">
+        {@status.queue.pending} queued
+      </span>
+      <span :if={@status.queue.busy > 0} class="badge badge-sm badge-info">
+        {@status.queue.busy} running
+      </span>
+    </div>
+
+    <div class="flex-none gap-2 items-center">
+      <span class={["badge badge-sm", status_tone(active_provider(@status).ready?)]}>
+        {active_provider(@status).name}
+      </span>
+      <span class={["badge badge-sm", status_tone(@graph_available?)]}>
+        graph {if @graph_available?, do: "up", else: "off"}
+      </span>
+      <button class="btn btn-sm btn-primary" phx-click="run_cycle">Run a cycle</button>
+    </div>
+  </header>
+
+  <div :if={not active_provider(@status).ready?} class="alert alert-warning rounded-none">
+    <span>{active_provider(@status).hint}</span>
+  </div>
+
+  <div :if={not @status.can_publish?} class="alert alert-info rounded-none text-sm">
+    <span>{@status.publish_hint}</span>
+  </div>
+
+  <main class="grid grid-cols-1 lg:grid-cols-5 gap-4 p-4">
+    <%!-- Conversation --%>
+    <section class="lg:col-span-3 flex flex-col bg-base-100 rounded-box border border-base-300 h-[calc(100vh-11rem)]">
+      <div id="transcript" class="flex-1 overflow-y-auto p-4 space-y-3">
+        <div :if={@turns == []} class="text-center text-base-content/60 py-12">
+          <p class="font-medium">Ask the swarm something.</p>
+          <p class="text-sm mt-1">
+            It knows about jido, glider and glider_ex — or press
+            <span class="font-mono">Run a cycle</span>
+            to have it go and look.
+          </p>
+        </div>
+
+        <div :for={turn <- @turns} class={["chat", chat_side(turn)]}>
+          <div class="chat-header text-xs opacity-60">
+            {turn.role}
+            <span :if={turn[:worker] not in [nil, ""]} class="ml-1 font-mono">{turn.worker}</span>
+            <time class="ml-1">{format_time(turn[:at])}</time>
+          </div>
+          <div class={["chat-bubble whitespace-pre-wrap", chat_tone(turn)]}>{turn.body}</div>
+        </div>
+
+        <div :if={@pending_reply} class="chat chat-start">
+          <div class="chat-bubble">
+            <span class="loading loading-dots loading-sm"></span>
+          </div>
+        </div>
+      </div>
+
+      <form phx-submit="send" phx-change="compose" class="border-t border-base-300 p-3 flex gap-2">
+        <input
+          type="text"
+          name="message"
+          value={@composer}
+          autocomplete="off"
+          placeholder="Ask the swarm…"
+          class="input input-bordered flex-1"
+        />
+        <button type="submit" class="btn btn-primary" disabled={@pending_reply != nil}>
+          Send
+        </button>
+      </form>
+    </section>
+
+    <%!-- Swarm state --%>
+    <aside class="lg:col-span-2 space-y-4 h-[calc(100vh-11rem)] overflow-y-auto">
+      <div class="stats stats-horizontal w-full bg-base-100 border border-base-300">
+        <div class="stat py-3">
+          <div class="stat-title text-xs">Findings</div>
+          <div class="stat-value text-2xl">{@summary.findings}</div>
+        </div>
+        <div class="stat py-3">
+          <div class="stat-title text-xs">Proposals</div>
+          <div class="stat-value text-2xl">{@summary.proposals}</div>
+        </div>
+        <div class="stat py-3">
+          <div class="stat-title text-xs">Attempts</div>
+          <div class="stat-value text-2xl">{@summary.attempts}</div>
+        </div>
+      </div>
+
+      <div class="card bg-base-100 border border-base-300">
+        <div class="card-body p-4 gap-2">
+          <h2 class="card-title text-sm">Pool</h2>
+          <div class="text-xs opacity-70">
+            {@status.autoscaler.min_workers}–{@status.autoscaler.max_workers} workers,
+            +{@status.autoscaler.scale_step} per scale-out, retire after
+            {div(@status.autoscaler.idle_ttl, 1000)}s idle
+          </div>
+          <div class="flex flex-wrap gap-1">
+            <span :for={worker <- @status.workers} class="badge badge-sm badge-outline font-mono">
+              {worker}
+            </span>
+          </div>
+          <div :if={@status.queue.running != []} class="mt-1 space-y-1">
+            <div :for={job <- @status.queue.running} class="text-xs flex justify-between gap-2">
+              <span class="font-mono truncate">{job.worker}</span>
+              <span class="opacity-70 truncate">{JidoSwarm.Job.label(job)}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card bg-base-100 border border-base-300">
+        <div class="card-body p-4 gap-2">
+          <h2 class="card-title text-sm">Repositories</h2>
+          <div :for={repo <- @repos} class="flex items-center justify-between gap-2">
+            <span class="font-mono text-sm">{repo.name}</span>
+            <span class="flex gap-1">
+              <button class="btn btn-xs" phx-click="survey" phx-value-repo={repo.name}>
+                survey
+              </button>
+              <button class="btn btn-xs" phx-click="propose" phx-value-repo={repo.name}>
+                propose
+              </button>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card bg-base-100 border border-base-300">
+        <div class="card-body p-4 gap-2">
+          <div role="tablist" class="tabs tabs-bordered">
+            <button
+              :for={{tab, label} <- [findings: "Findings", proposals: "Proposals", attempts: "Attempts", activity: "Activity"]}
+              role="tab"
+              class={["tab", @tab == tab && "tab-active"]}
+              phx-click="tab"
+              phx-value-tab={tab}
+            >
+              {label}
+            </button>
+          </div>
+
+          <div :if={@tab == :findings} class="space-y-2 pt-2">
+            <p :if={@findings == []} class="text-xs opacity-60">
+              Nothing learned yet. Run a survey.
+            </p>
+            <div :for={finding <- Enum.take(@findings, 25)} class="text-sm border-l-2 border-base-300 pl-2">
+              <span class="badge badge-xs badge-outline mr-1">{finding.kind}</span>
+              {finding.summary}
+            </div>
+          </div>
+
+          <div :if={@tab == :proposals} class="space-y-2 pt-2">
+            <p :if={@proposals == []} class="text-xs opacity-60">
+              No proposals yet. Survey a repository first, then press propose.
+            </p>
+            <div :for={proposal <- Enum.take(@proposals, 25)} class="text-sm border-l-2 border-base-300 pl-2">
+              <div class="flex items-start justify-between gap-2">
+                <div>
+                  <span class={["badge badge-xs mr-1", proposal_tone(proposal.status)]}>
+                    {proposal.status}
+                  </span>
+                  <span class="font-medium">{proposal.title}</span>
+                  <span class="font-mono text-xs opacity-60 ml-1">{proposal.repo}</span>
+                </div>
+                <button
+                  :if={proposal.status == "proposed"}
+                  class="btn btn-xs btn-primary shrink-0"
+                  phx-click="implement"
+                  phx-value-key={proposal.key}
+                >
+                  implement
+                </button>
+              </div>
+              <p class="text-xs opacity-70 mt-1">{proposal.rationale}</p>
+            </div>
+          </div>
+
+          <div :if={@tab == :attempts} class="space-y-2 pt-2">
+            <p :if={@attempts == []} class="text-xs opacity-60">
+              No implementation attempts yet.
+            </p>
+            <div :for={attempt <- Enum.take(@attempts, 25)} class="text-sm border-l-2 border-base-300 pl-2">
+              <span class={["badge badge-xs mr-1", attempt_tone(attempt.status)]}>
+                {attempt.status}
+              </span>
+              <span class="font-mono text-xs">{attempt.repo}</span>
+              <span class="font-mono text-xs opacity-60 ml-1">{attempt.branch}</span>
+              <a
+                :if={attempt.pr_url not in [nil, ""]}
+                href={attempt.pr_url}
+                target="_blank"
+                rel="noopener"
+                class="link link-primary text-xs ml-1"
+              >
+                pull request
+              </a>
+              <p :if={attempt.note not in [nil, ""]} class="text-xs opacity-60 mt-1 font-mono whitespace-pre-wrap">
+                {String.slice(attempt.note, 0, 400)}
+              </p>
+            </div>
+          </div>
+
+          <div :if={@tab == :activity} class="space-y-1 pt-2">
+            <p :if={@status.history == []} class="text-xs opacity-60">No finished jobs yet.</p>
+            <div :for={entry <- @status.history} class="text-xs flex justify-between gap-2">
+              <span class="truncate">
+                <span class={["badge badge-xs mr-1", status_tone(entry.status == :done)]}>
+                  {entry.status}
+                </span>
+                {entry.label}
+              </span>
+              <span class="opacity-60 shrink-0">{format_duration(entry.duration_ms)}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
+</div>
