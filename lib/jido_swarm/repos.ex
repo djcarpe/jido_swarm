@@ -217,10 +217,21 @@ defmodule JidoSwarm.Repos do
   Resolves a repository-relative path, refusing anything outside the clone.
   """
   @spec safe_path(repo(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def safe_path(_repo, "/" <> _ = absolute) do
+    # `Path.join/2` would quietly reinterpret "/etc/passwd" as
+    # "<repo>/etc/passwd" - contained, but silently not what was asked for. A
+    # model emitting an absolute path has misunderstood the contract, and
+    # saying so is more useful than writing somewhere it did not intend.
+    {:error, {:absolute_path, absolute}}
+  end
+
   def safe_path(repo, relative) do
     root = repo |> path() |> Path.expand()
     candidate = root |> Path.join(relative) |> Path.expand()
 
+    # The trailing separator matters: without it a sibling directory sharing
+    # the repository's name as a prefix ("<root>/demo-evil" against
+    # "<root>/demo") would pass as contained.
     if candidate == root or String.starts_with?(candidate, root <> "/") do
       {:ok, candidate}
     else

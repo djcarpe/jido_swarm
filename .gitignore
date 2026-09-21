@@ -35,3 +35,6 @@ jido_swarm-*.tar
 npm-debug.log
 /assets/node_modules/
 
+
+# The swarm own clones of the target repositories.
+/tmp/swarm_repos/

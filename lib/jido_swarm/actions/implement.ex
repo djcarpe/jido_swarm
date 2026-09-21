@@ -38,6 +38,13 @@ defmodule JidoSwarm.Actions.Implement do
 
   @max_files 6
 
+  # Below this, a file is small enough that a large proportional change is
+  # ordinary rather than suspicious.
+  @small_file_lines 40
+
+  # A rewrite retaining less of the original than this is treated as truncation.
+  @min_retained_ratio 0.5
+
   @spec run(map(), map()) :: {:ok, map()}
   def run(params, _ctx) do
     JidoSwarm.Actions.outcome(params, fn -> do_run(params) end)
@@ -112,6 +119,10 @@ defmodule JidoSwarm.Actions.Implement do
     small and reviewable — at most #{@max_files} files. Match the surrounding style. If the
     project has tests, include one.
 
+    Strongly prefer adding NEW files over rewriting existing ones. When you must change an
+    existing file you have to reproduce it in full, and omitting any part of it deletes that
+    part. If a file is long, find a way to make the change by adding a new module instead.
+
     Respond with JSON only, in exactly this shape:
     {"files": [{"path": "lib/foo/bar.ex", "contents": "<the entire file>"}],
      "summary": "one paragraph describing the change"}
@@ -150,13 +161,59 @@ defmodule JidoSwarm.Actions.Implement do
   defp apply_edits(_repo, []), do: {:error, :no_usable_edits}
 
   defp apply_edits(repo, edits) do
-    Enum.reduce_while(edits, :ok, fn edit, :ok ->
-      case Repos.write_file(repo, edit.path, edit.contents) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, {:write_failed, edit.path, reason}}}
-      end
-    end)
+    with {:ok, safe} <- reject_truncations(repo, edits) do
+      Enum.reduce_while(safe, :ok, fn edit, :ok ->
+        case Repos.write_file(repo, edit.path, edit.contents) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, {:write_failed, edit.path, reason}}}
+        end
+      end)
+    end
   end
+
+  # Guards against the characteristic failure of asking a small model to
+  # "write the complete new contents" of a large file: it writes the part it
+  # was thinking about and silently drops the rest. Observed in practice — a
+  # 1555-line module came back as 35 lines, deleting 1889 lines across the
+  # change. The tests caught it, but a plausible-looking truncation that still
+  # compiled would not have been caught, and the model had no idea it had done
+  # anything wrong.
+  #
+  # A rewrite that keeps less than @min_retained_ratio of the original is
+  # treated as truncation, not as an intentional deletion. Genuinely deleting
+  # most of a file is rare, and asking for it again is cheap; shipping a
+  # silently gutted module is not.
+  defp reject_truncations(repo, edits) do
+    {safe, truncated} = Enum.split_with(edits, &acceptable_size?(repo, &1))
+
+    cond do
+      truncated != [] ->
+        paths = Enum.map_join(truncated, ", ", & &1.path)
+        {:error, {:truncated_rewrite, paths}}
+
+      safe == [] ->
+        {:error, :no_usable_edits}
+
+      true ->
+        {:ok, safe}
+    end
+  end
+
+  defp acceptable_size?(repo, edit) do
+    case Repos.read_file(repo, edit.path, 2_000_000) do
+      # A new file has nothing to shrink from.
+      {:error, _} ->
+        true
+
+      {:ok, existing} ->
+        existing_lines = count_lines(existing)
+
+        existing_lines <= @small_file_lines or
+          count_lines(edit.contents) / existing_lines >= @min_retained_ratio
+    end
+  end
+
+  defp count_lines(text), do: text |> String.split("\n") |> length()
 
   # The model is shown files whose names overlap the proposal's own words. Crude,
   # but it beats both a random sample and the whole tree, and it costs nothing.
