@@ -7,17 +7,19 @@ data:
   PHX_HOST: "swarm.home"
   PORT: "4000"
 
-  # The local model, reached through the ollama-external Service.
-  LLM_PROVIDER: "ollama"
+  # Claude. The key itself lives in the Secret, never here.
+  LLM_PROVIDER: "anthropic"
   OLLAMA_BASE_URL: "http://ollama-external.jido-swarm.svc.cluster.local:11434"
   OLLAMA_MODEL: "qwen3:4b-instruct"
   # Ollama defaults to a 4096-token window regardless of what the model
   # supports, which is smaller than the swarm's prompts.
   OLLAMA_NUM_CTX: "16384"
 
-  # Claude, once a key exists. Switch LLM_PROVIDER to "anthropic" and nothing
-  # else has to change.
   ANTHROPIC_MODEL: "claude-opus-5"
+
+  # Kept so switching back is one word: set LLM_PROVIDER to "ollama". Reaching
+  # the workstation's model needs OLLAMA_HOST=0.0.0.0:11434 there; the
+  # Anthropic API needs only egress, which this cluster has.
 
   # The elastic pool. Two replicas each scaling to 4 gives the cluster up to
   # eight concurrent workers against one workstation GPU, which is already more

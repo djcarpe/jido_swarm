@@ -66,10 +66,11 @@ config :phoenix, :json_library, Jason
 # and jido_action's 30s default cuts both off long before they finish.
 config :jido_action, default_timeout: 900_000
 
-# The model. Ollama is the default so a checkout with no API key still runs;
-# set :provider to JidoSwarm.LLM.Anthropic once ANTHROPIC_API_KEY is present.
+# The model. Claude by default; ANTHROPIC_API_KEY supplies the key and nothing
+# else is needed. Set LLM_PROVIDER=ollama (or :provider here) to go back to the
+# local model — the prompts are provider-neutral, so nothing else changes.
 config :jido_swarm, JidoSwarm.LLM,
-  provider: JidoSwarm.LLM.Ollama,
+  provider: JidoSwarm.LLM.Anthropic,
   ollama: [
     base_url: "http://127.0.0.1:11434",
     model: "qwen3:4b-instruct",

@@ -46,13 +46,12 @@ end
 # work when running from a checkout and from the release in Kubernetes.
 # ---------------------------------------------------------------------------
 
-# The model. Ollama by default; set LLM_PROVIDER=anthropic once a key is in
-# place. Nothing else has to change to switch.
+# The model. Claude by default; LLM_PROVIDER=ollama switches to the local one.
 llm_provider =
-  case System.get_env("LLM_PROVIDER", "ollama") do
-    "anthropic" -> JidoSwarm.LLM.Anthropic
-    "claude" -> JidoSwarm.LLM.Anthropic
-    _ -> JidoSwarm.LLM.Ollama
+  case System.get_env("LLM_PROVIDER", "anthropic") do
+    "ollama" -> JidoSwarm.LLM.Ollama
+    "local" -> JidoSwarm.LLM.Ollama
+    _ -> JidoSwarm.LLM.Anthropic
   end
 
 config :jido_swarm, JidoSwarm.LLM,

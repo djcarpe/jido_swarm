@@ -14,9 +14,10 @@ defmodule JidoSwarm.LLM.Anthropic do
           model: "claude-opus-5"
         ]
 
-  Until a key is present, `ready?/0` is false and the swarm stays on the local
-  model. Nothing else needs to change to switch over: set the key and flip
-  `:provider`.
+  This is the default provider. Until `ANTHROPIC_API_KEY` is present `ready?/0`
+  is false, every call returns `{:error, {:not_configured, hint}}`, and the UI
+  says so — the swarm degrades visibly rather than silently doing nothing.
+  Set `LLM_PROVIDER=ollama` to use the local model instead.
 
   ## Choices this makes, and why
 
@@ -47,8 +48,8 @@ defmodule JidoSwarm.LLM.Anthropic do
 
   @impl true
   def readiness_hint do
-    "Set ANTHROPIC_API_KEY (or :api_key under config :jido_swarm, JidoSwarm.LLM, :anthropic) " <>
-      "and set :provider to JidoSwarm.LLM.Anthropic."
+    "No Anthropic API key. Set ANTHROPIC_API_KEY in the environment — in Kubernetes, " <>
+      "add it to the jido-swarm Secret. Until then the swarm cannot reach a model."
   end
 
   @impl true
