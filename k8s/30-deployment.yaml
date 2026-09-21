@@ -20,7 +20,11 @@ spec:
           # Resolved by the nodes' DNS, not by cluster DNS — containerd pulls
           # before any pod exists, so a *.svc.cluster.local reference cannot work.
           image: harbor.home/library/jido-swarm:latest
-          imagePullPolicy: IfNotPresent
+          # `:latest` is a moving tag, and IfNotPresent would keep whatever the
+          # node already cached — a rollout would restart the pods and quietly
+          # run the previous build. For a reproducible deploy, push an
+          # immutable tag and pin it here instead.
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 4000
@@ -54,6 +58,16 @@ spec:
               value: name
             - name: RELEASE_NODE
               value: jido_swarm@$(POD_IP)
+            # `mix release` bakes a freshly generated cookie into every build,
+            # so two pods running different image versions can never complete
+            # the distribution handshake — which is exactly what happens during
+            # a rolling deploy, silently splitting the mesh. Pinning it in the
+            # Secret makes clustering independent of build identity.
+            - name: RELEASE_COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: jido-swarm
+                  key: RELEASE_COOKIE
           volumeMounts:
             - name: workspace
               mountPath: /var/lib/jido_swarm
