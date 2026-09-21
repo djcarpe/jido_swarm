@@ -15,7 +15,10 @@ config :jido_swarm, JidoSwarmWeb.Endpoint,
   force_ssl: [
     rewrite_on: [:x_forwarded_proto],
     exclude: [
-      # paths: ["/health"],
+      # Kubelet probes reach the pod directly over http with no
+      # x-forwarded-proto, so a redirect here would make them pass for the
+      # wrong reason.
+      paths: ["/health", "/health/ready"],
       hosts: ["localhost", "127.0.0.1"]
     ]
   ]

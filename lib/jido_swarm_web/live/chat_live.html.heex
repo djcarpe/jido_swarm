@@ -63,7 +63,12 @@
         </div>
       </div>
 
-      <form phx-submit="send" phx-change="compose" class="border-t border-base-300 p-3 flex gap-2">
+      <form
+        id="composer"
+        phx-submit="send"
+        phx-change="compose"
+        class="border-t border-base-300 p-3 flex gap-2"
+      >
         <input
           type="text"
           name="message"

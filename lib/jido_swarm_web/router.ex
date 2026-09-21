@@ -20,6 +20,15 @@ defmodule JidoSwarmWeb.Router do
     live "/", ChatLive, :index
   end
 
+  # Probes, on the api pipeline so they neither fetch a session nor render a
+  # layout, and excluded from force_ssl in config/prod.exs.
+  scope "/health", JidoSwarmWeb do
+    pipe_through :api
+
+    get "/", HealthController, :show
+    get "/ready", HealthController, :ready
+  end
+
   # Other scopes may use custom stacks.
   # scope "/api", JidoSwarmWeb do
   #   pipe_through :api

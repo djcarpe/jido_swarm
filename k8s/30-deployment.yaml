@@ -30,6 +30,13 @@ spec:
             - secretRef:
                 name: jido-swarm
           env:
+            # Declared first: Kubernetes only substitutes $(VAR) from variables
+            # defined *earlier* in this list, so RELEASE_NODE below would
+            # otherwise be the literal string "jido_swarm@$(POD_IP)".
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             # Each pod is one origin in the context mesh. Two graphs sharing an
             # origin would tie in the last-writer-wins ordering and diverge, so
             # this must be unique and stable for the pod's life — which is
@@ -47,22 +54,18 @@ spec:
               value: name
             - name: RELEASE_NODE
               value: jido_swarm@$(POD_IP)
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
           volumeMounts:
             - name: workspace
               mountPath: /var/lib/jido_swarm
           readinessProbe:
             httpGet:
-              path: /
+              path: /health/ready
               port: http
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /
+              path: /health
               port: http
             initialDelaySeconds: 30
             periodSeconds: 30
