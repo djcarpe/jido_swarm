@@ -99,6 +99,11 @@ defmodule JidoSwarmWeb.ChatLive do
     {:noreply, assign(socket, :tab, String.to_existing_atom(tab))}
   end
 
+  def handle_event("reset_metrics", _params, socket) do
+    JidoSwarm.GliderMetrics.reset()
+    {:noreply, socket |> put_flash(:info, "Glider metrics cleared.") |> load()}
+  end
+
   # ===========================================================================
   # Messages
   # ===========================================================================
@@ -156,6 +161,7 @@ defmodule JidoSwarmWeb.ChatLive do
     |> assign(:proposals, if(graph_available?, do: Knowledge.proposals(graph), else: []))
     |> assign(:attempts, if(graph_available?, do: Knowledge.attempts(graph), else: []))
     |> assign(:repos, JidoSwarm.Repos.all())
+    |> assign(:glider, JidoSwarm.GliderMetrics.snapshot())
     |> assign_turns(graph_available?, graph)
   end
 
@@ -226,6 +232,107 @@ defmodule JidoSwarmWeb.ChatLive do
   @doc false
   def chat_tone(%{role: "user"}), do: "chat-bubble-primary"
   def chat_tone(_), do: ""
+
+  @doc """
+  Turns a raw job error into a sentence worth showing an operator.
+
+  The API's own message is usually the most accurate description available, so
+  it is preferred over anything invented here — but a few recur often enough,
+  and read obscurely enough, to be worth naming with the fix attached. The
+  workspace one in particular presents as "every job fails" with nothing in the
+  UI explaining why.
+  """
+  @spec explain_failure(String.t() | nil) :: String.t()
+  def explain_failure(nil), do: "Unknown error."
+
+  def explain_failure(error) do
+    cond do
+      error =~ "not scoped to a workspace" ->
+        "The Anthropic API key is organization-scoped, so it needs a workspace. " <>
+          "Set ANTHROPIC_WORKSPACE_ID in the jido-swarm Secret, or use a workspace-scoped key."
+
+      error =~ "not_configured" or error =~ "No Anthropic API key" ->
+        "No model is configured. Set ANTHROPIC_API_KEY in the jido-swarm Secret."
+
+      error =~ "authentication_error" or error =~ "invalid x-api-key" ->
+        "The Anthropic API key was rejected. Check ANTHROPIC_API_KEY."
+
+      error =~ "no_github_token" ->
+        "Pushing needs GITHUB_TOKEN. Implementation and tests still run without it."
+
+      error =~ "exceed_context_size" ->
+        "The prompt exceeded the model's context window."
+
+      error =~ "no_findings" ->
+        "Nothing has been learned about that repository yet — run a survey first."
+
+      # An API message is usually more accurate than anything guessed here.
+      true ->
+        case Regex.run(~r/"message" => "([^"]{10,300})"/, error) do
+          [_, message] -> message
+          _ -> String.slice(error, 0, 300)
+        end
+    end
+  end
+
+  @doc """
+  Microseconds as something a person can read at a glance.
+
+  Graph work spans six orders of magnitude — an indexed lookup is single-digit
+  microseconds, a whole-graph algorithm is seconds — so a fixed unit would make
+  most of the column unreadable.
+  """
+  @spec format_us(integer() | nil) :: String.t()
+  def format_us(nil), do: "—"
+  def format_us(0), do: "0"
+  def format_us(us) when us < 1_000, do: "#{us}µs"
+  def format_us(us) when us < 1_000_000, do: "#{Float.round(us / 1_000, 1)}ms"
+  def format_us(us), do: "#{Float.round(us / 1_000_000, 2)}s"
+
+  @doc "Large counts, abbreviated."
+  @spec format_count(integer() | nil) :: String.t()
+  def format_count(nil), do: "0"
+  def format_count(n) when n < 1_000, do: Integer.to_string(n)
+  def format_count(n) when n < 1_000_000, do: "#{Float.round(n / 1_000, 1)}k"
+  def format_count(n), do: "#{Float.round(n / 1_000_000, 2)}M"
+
+  @doc """
+  A sparkline over the per-second series, as inline SVG polyline points.
+
+  Drawn rather than charted: it is a shape, not a figure to read values off,
+  and a charting library would be several hundred kilobytes for one line.
+  """
+  @spec sparkline([map()], atom(), pos_integer(), pos_integer()) :: String.t()
+  def sparkline(series, field, width \\ 240, height \\ 32)
+  def sparkline([], _field, _width, _height), do: ""
+
+  def sparkline(series, field, width, height) do
+    values = Enum.map(series, &Map.get(&1, field, 0))
+    max = Enum.max(values, fn -> 0 end)
+    count = length(values)
+
+    # A flat line along the bottom is the honest rendering of "nothing
+    # happened", and it avoids dividing by zero.
+    # Kept as floats throughout: with a single sample `step` would otherwise be
+    # the integer width, and `index * step` an integer, which Float.round/2
+    # rejects — a one-point series is exactly what a freshly started pod has.
+    scale = if max > 0, do: max * 1.0, else: 1.0
+    step = if count > 1, do: width / (count - 1), else: width * 1.0
+
+    values
+    |> Enum.with_index()
+    |> Enum.map_join(" ", fn {value, index} ->
+      x = Float.round(index * step, 1)
+      y = Float.round(height - value / scale * (height - 2) - 1.0, 1)
+      "#{x},#{y}"
+    end)
+  end
+
+  @doc "Error rate as a tone, so a bad row is visible without reading numbers."
+  @spec error_tone(number()) :: String.t()
+  def error_tone(rate) when rate >= 10, do: "text-error font-semibold"
+  def error_tone(rate) when rate > 0, do: "text-warning"
+  def error_tone(_), do: "opacity-60"
 
   @doc false
   def format_duration(nil), do: ""

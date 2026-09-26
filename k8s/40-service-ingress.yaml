@@ -40,8 +40,20 @@ metadata:
   namespace: jido-swarm
   labels:
     app.kubernetes.io/name: jido-swarm
+  annotations:
+    # A real certificate from the cluster's own CA, the same way blog.home and
+    # the other services get one. Not cosmetic: the app sends HSTS
+    # (Phoenix force_ssl), and a browser that has seen HSTS for this host will
+    # refuse a self-signed certificate outright — no click-through, no way in.
+    # Traefik's default cert plus HSTS makes the site unreachable, not merely
+    # untrusted.
+    cert-manager.io/cluster-issuer: step-ca-issuer
 spec:
   ingressClassName: traefik
+  tls:
+    - hosts:
+        - swarm.home
+      secretName: jido-swarm-home-tls
   rules:
     - host: swarm.home
       http:

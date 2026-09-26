@@ -64,6 +64,9 @@ config :jido_swarm, JidoSwarm.LLM,
   ],
   anthropic: [
     api_key: System.get_env("ANTHROPIC_API_KEY"),
+    # Only needed for an organization-scoped key; a workspace-scoped key
+    # carries its workspace implicitly.
+    workspace_id: System.get_env("ANTHROPIC_WORKSPACE_ID"),
     model: System.get_env("ANTHROPIC_MODEL", "claude-opus-5"),
     timeout: String.to_integer(System.get_env("ANTHROPIC_TIMEOUT_MS", "600000"))
   ]

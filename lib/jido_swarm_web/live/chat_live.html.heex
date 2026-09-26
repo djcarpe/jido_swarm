@@ -22,12 +22,34 @@
       <span class={["badge badge-sm", status_tone(@graph_available?)]}>
         graph {if @graph_available?, do: "up", else: "off"}
       </span>
+      <span
+        :if={@glider.totals.calls > 0}
+        class="badge badge-sm badge-ghost font-mono"
+        title="Glider operations since start"
+      >
+        {format_count(@glider.totals.calls)} ops
+      </span>
+      <span
+        :if={@glider.totals.error_rate > 0}
+        class="badge badge-sm badge-error font-mono"
+        title="Share of Glider operations that failed"
+      >
+        {@glider.totals.error_rate}% err
+      </span>
       <button class="btn btn-sm btn-primary" phx-click="run_cycle">Run a cycle</button>
     </div>
   </header>
 
   <div :if={not active_provider(@status).ready?} class="alert alert-warning rounded-none">
     <span>{active_provider(@status).hint}</span>
+  </div>
+
+  <div :for={failure <- @status.failures} class="alert alert-error rounded-none text-sm">
+    <div>
+      <span class="font-semibold">Jobs are failing.</span>
+      <span>{explain_failure(failure.error)}</span>
+      <div class="text-xs opacity-70 mt-1 font-mono">{failure.label}</div>
+    </div>
   </div>
 
   <div :if={not @status.can_publish?} class="alert alert-info rounded-none text-sm">
@@ -143,7 +165,7 @@
         <div class="card-body p-4 gap-2">
           <div role="tablist" class="tabs tabs-bordered">
             <button
-              :for={{tab, label} <- [findings: "Findings", proposals: "Proposals", attempts: "Attempts", activity: "Activity"]}
+              :for={{tab, label} <- [findings: "Findings", proposals: "Proposals", attempts: "Attempts", activity: "Activity", glider: "Glider"]}
               role="tab"
               class={["tab", @tab == tab && "tab-active"]}
               phx-click="tab"
@@ -214,16 +236,125 @@
             </div>
           </div>
 
+          <div :if={@tab == :glider} class="space-y-3 pt-2">
+            <p :if={@glider.totals.calls == 0} class="text-xs opacity-60">
+              No graph operations recorded yet.
+            </p>
+
+            <div :if={@glider.totals.calls > 0} class="space-y-3">
+              <%!-- Headline usage --%>
+              <div class="grid grid-cols-2 gap-2 text-xs">
+                <div class="bg-base-200 rounded p-2">
+                  <div class="opacity-60">Operations</div>
+                  <div class="text-lg font-mono">{format_count(@glider.totals.calls)}</div>
+                </div>
+                <div class="bg-base-200 rounded p-2">
+                  <div class="opacity-60">Time in Glider</div>
+                  <div class="text-lg font-mono">{format_us(@glider.totals.busy_us)}</div>
+                </div>
+                <div class="bg-base-200 rounded p-2">
+                  <div class="opacity-60">Rows read</div>
+                  <div class="text-lg font-mono">{format_count(@glider.totals.rows)}</div>
+                </div>
+                <div class="bg-base-200 rounded p-2">
+                  <div class="opacity-60">Entities written</div>
+                  <div class="text-lg font-mono">{format_count(@glider.totals.touched)}</div>
+                </div>
+              </div>
+
+              <div :if={@glider.totals.errors > 0} class="alert alert-error p-2 text-xs">
+                <span>
+                  {@glider.totals.errors} failed
+                  ({@glider.totals.error_rate}% of all operations)
+                </span>
+              </div>
+
+              <%!-- Throughput over the retained window --%>
+              <div :if={@glider.series != []}>
+                <div class="flex items-baseline justify-between text-xs opacity-60 mb-1">
+                  <span>Operations/sec</span>
+                  <span>last {div(@glider.window_seconds, 60)}m</span>
+                </div>
+                <svg viewBox="0 0 240 32" class="w-full h-8" preserveAspectRatio="none">
+                  <polyline
+                    points={sparkline(@glider.series, :calls)}
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    class="text-primary"
+                    vector-effect="non-scaling-stroke"
+                  />
+                </svg>
+              </div>
+
+              <%!-- Per-operation latency and volume --%>
+              <div class="overflow-x-auto">
+                <table class="table table-xs">
+                  <thead>
+                    <tr>
+                      <th>op</th>
+                      <th class="text-right">calls</th>
+                      <th class="text-right">p50</th>
+                      <th class="text-right">p95</th>
+                      <th class="text-right">p99</th>
+                      <th class="text-right">max</th>
+                      <th class="text-right">err</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr :for={op <- @glider.operations} class="font-mono">
+                      <td>{op.operation}</td>
+                      <td class="text-right">{format_count(op.calls)}</td>
+                      <td class="text-right">{format_us(op.p50_us)}</td>
+                      <td class="text-right">{format_us(op.p95_us)}</td>
+                      <td class="text-right">{format_us(op.p99_us)}</td>
+                      <td class="text-right opacity-60">{format_us(op.max_us)}</td>
+                      <td class={["text-right", error_tone(op.error_rate)]}>
+                        {if op.errors > 0, do: "#{op.error_rate}%", else: "—"}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <p class="text-xs opacity-50 mt-1">
+                  Percentiles over the most recent {@glider.sample_limit} calls per operation.
+                </p>
+              </div>
+
+              <%!-- What the graph is being asked to do --%>
+              <div :if={@glider.cypher != []}>
+                <div class="text-xs opacity-60 mb-1">By statement</div>
+                <div class="flex flex-wrap gap-1">
+                  <span
+                    :for={entry <- Enum.take(@glider.cypher, 12)}
+                    class={["badge badge-sm font-mono", entry.errors > 0 && "badge-error"]}
+                    title={"#{entry.calls} calls, #{entry.errors} failed"}
+                  >
+                    {entry.keyword} {format_count(entry.calls)}
+                  </span>
+                </div>
+              </div>
+
+              <button class="btn btn-xs btn-ghost" phx-click="reset_metrics">
+                reset metrics
+              </button>
+            </div>
+          </div>
+
           <div :if={@tab == :activity} class="space-y-1 pt-2">
             <p :if={@status.history == []} class="text-xs opacity-60">No finished jobs yet.</p>
-            <div :for={entry <- @status.history} class="text-xs flex justify-between gap-2">
-              <span class="truncate">
-                <span class={["badge badge-xs mr-1", status_tone(entry.status == :done)]}>
-                  {entry.status}
+            <div :for={entry <- @status.history} class="text-xs">
+              <div class="flex justify-between gap-2">
+                <span class="truncate">
+                  <span class={["badge badge-xs mr-1", status_tone(entry.status == :done)]}>
+                    {entry.status}
+                  </span>
+                  {entry.label}
                 </span>
-                {entry.label}
-              </span>
-              <span class="opacity-60 shrink-0">{format_duration(entry.duration_ms)}</span>
+                <span class="opacity-60 shrink-0">{format_duration(entry.duration_ms)}</span>
+              </div>
+              <div :if={entry.error} class="text-error opacity-80 pl-1 mt-0.5">
+                {explain_failure(entry.error)}
+              </div>
             </div>
           </div>
         </div>

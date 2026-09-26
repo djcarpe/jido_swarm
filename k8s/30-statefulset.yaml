@@ -1,12 +1,29 @@
+# A StatefulSet rather than a Deployment, for two reasons that both come from
+# the knowledge mesh.
+#
+# **Durable graphs.** Each replica gets its own PersistentVolumeClaim, so the
+# graph file survives rescheduling rather than dying with an emptyDir. The mesh
+# can rebuild a lost replica from its peers, but only while a peer is up — a
+# simultaneous restart of every pod would otherwise lose everything learned.
+#
+# **Stable origins.** A pod's name is its identity in the mesh, and the mesh
+# orders writes by `{seq, origin}`. Deployment pods get a fresh random name on
+# every restart, so a replica's whole history becomes a stranger's each time it
+# comes back. StatefulSet names (jido-swarm-0, -1) are stable for the life of
+# the replica, which is what the ordering assumes.
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: jido-swarm
   namespace: jido-swarm
   labels:
     app.kubernetes.io/name: jido-swarm
 spec:
+  serviceName: jido-swarm-headless
   replicas: 2
+  # The replicas are peers, not a sequence — one does not need another to exist
+  # before it can start, and waiting would double the rollout time for nothing.
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       app.kubernetes.io/name: jido-swarm
@@ -15,15 +32,13 @@ spec:
       labels:
         app.kubernetes.io/name: jido-swarm
     spec:
+      terminationGracePeriodSeconds: 45
       containers:
         - name: jido-swarm
-          # Resolved by the nodes' DNS, not by cluster DNS — containerd pulls
-          # before any pod exists, so a *.svc.cluster.local reference cannot work.
           image: harbor.home/library/jido-swarm:latest
           # `:latest` is a moving tag, and IfNotPresent would keep whatever the
           # node already cached — a rollout would restart the pods and quietly
-          # run the previous build. For a reproducible deploy, push an
-          # immutable tag and pin it here instead.
+          # run the previous build.
           imagePullPolicy: Always
           ports:
             - name: http
@@ -35,23 +50,17 @@ spec:
                 name: jido-swarm
           env:
             # Declared first: Kubernetes only substitutes $(VAR) from variables
-            # defined *earlier* in this list, so RELEASE_NODE below would
-            # otherwise be the literal string "jido_swarm@$(POD_IP)".
+            # defined *earlier* in this list.
             - name: POD_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            # Each pod is one origin in the context mesh. Two graphs sharing an
-            # origin would tie in the last-writer-wins ordering and diverge, so
-            # this must be unique and stable for the pod's life — which is
-            # exactly what the pod name is.
+            # The mesh origin. Stable across restarts now that it is a
+            # StatefulSet ordinal rather than a Deployment's random suffix.
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            # Lets the replicas find each other and form a BEAM cluster, so the
-            # mesh's `:pg` transport propagates deltas between them instantly
-            # and the S3 topic log is only the durable fallback.
             - name: DNS_CLUSTER_QUERY
               value: jido-swarm-headless.jido-swarm.svc.cluster.local
             - name: RELEASE_DISTRIBUTION
@@ -59,17 +68,15 @@ spec:
             - name: RELEASE_NODE
               value: jido_swarm@$(POD_IP)
             # `mix release` bakes a freshly generated cookie into every build,
-            # so two pods running different image versions can never complete
-            # the distribution handshake — which is exactly what happens during
-            # a rolling deploy, silently splitting the mesh. Pinning it in the
-            # Secret makes clustering independent of build identity.
+            # so two pods running different image versions could never complete
+            # the distribution handshake — exactly what happens mid-rollout.
             - name: RELEASE_COOKIE
               valueFrom:
                 secretKeyRef:
                   name: jido-swarm
                   key: RELEASE_COOKIE
           volumeMounts:
-            - name: workspace
+            - name: data
               mountPath: /var/lib/jido_swarm
           readinessProbe:
             httpGet:
@@ -92,10 +99,14 @@ spec:
               # Cloning three repositories and running their test suites is the
               # memory-hungry part, not the graph.
               memory: 3Gi
-      volumes:
-        # Clones and the graph file are a cache, not a system of record — the
-        # knowledge that matters is replicated through the mesh and snapshotted
-        # to S3. emptyDir keeps rescheduling cheap and avoids a PVC per replica.
-        - name: workspace
-          emptyDir:
-            sizeLimit: 8Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            # The graph is small; the repository clones and their build
+            # artifacts are what need room.
+            storage: 10Gi

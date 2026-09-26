@@ -7,6 +7,11 @@ data:
   PHX_HOST: "swarm.home"
   PORT: "4000"
 
+  # What the image syncer watches. Built and pushed by
+  # .github/workflows/build.yml; see k8s/50-image-sync.yaml for why the cluster
+  # pulls rather than GitHub pushing.
+  DEPLOY_IMAGE: "ghcr.io/djcarpe/jido_swarm:latest"
+
   # Claude. The key itself lives in the Secret, never here.
   LLM_PROVIDER: "anthropic"
   OLLAMA_BASE_URL: "http://ollama-external.jido-swarm.svc.cluster.local:11434"
@@ -32,6 +37,10 @@ data:
   # Where clones and the graph live inside the pod.
   SWARM_WORKSPACE: "/var/lib/jido_swarm/repos"
   SWARM_GRAPH_PATH: "/var/lib/jido_swarm/graph/swarm.gldb"
+  # Each pod owns its volume and runs one BEAM, so a graph lock found at
+  # startup is always stale — see the note in JidoSwarm.Application. Without
+  # this, one hard exit wedges the pod into a permanent crash loop.
+  SWARM_SINGLE_WRITER: "true"
   SWARM_SNAPSHOT_EVERY: "25"
 
   # The knowledge mesh's durable half. Left off until credentials for the

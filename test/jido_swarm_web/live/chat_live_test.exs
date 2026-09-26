@@ -32,6 +32,64 @@ defmodule JidoSwarmWeb.ChatLiveTest do
       assert view |> element("button", "Attempts") |> render_click() =~ "No implementation"
     end
 
+    test "the Glider tab reports instrumentation", %{conn: conn} do
+      JidoSwarm.GliderMetrics.reset()
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      # The dashboard reads the graph on every render, so by the time anyone
+      # can click the tab there is always something recorded — the instrument
+      # measures the app measuring itself, which is the honest reading.
+      # Do some more graph work, then confirm it is reported.
+      {:ok, _} = Jido.Context.assert(JidoSwarm.graph(), "ui:1", ["UiThing"], %{"v" => 1})
+      {:ok, _} = Jido.Context.query(JidoSwarm.graph(), "MATCH (t:UiThing) RETURN t.v")
+
+      html = view |> element("button", "Glider") |> render_click()
+
+      assert html =~ "Operations"
+      assert html =~ "Time in Glider"
+      # The per-operation latency table.
+      assert html =~ "p95"
+      assert html =~ "query"
+      # And the statement breakdown.
+      assert html =~ "MATCH"
+    end
+
+    test "Glider load is visible in the header without opening the tab", %{conn: conn} do
+      JidoSwarm.GliderMetrics.reset()
+      {:ok, _} = Jido.Context.assert(JidoSwarm.graph(), "hdr:1", ["HdrThing"], %{})
+
+      {:ok, _view, html} = live(conn, ~p"/")
+      assert html =~ "ops"
+    end
+
+    test "a failing job explains itself instead of just saying failed", %{conn: conn} do
+      # The exact shape a real org-scoped key produces. This presented to an
+      # operator as "it keeps crashing" with nothing in the UI saying why.
+      error =
+        ~s({:http, 400, %{"error" => %{"message" => "This API key is not scoped to a workspace, ) <>
+          ~s(so this request must include the anthropic-workspace-id header with the ID of the ) <>
+          ~s(workspace to use.", "type" => "invalid_request_error"}}})
+
+      explained = JidoSwarmWeb.ChatLive.explain_failure(error)
+
+      assert explained =~ "organization-scoped"
+      assert explained =~ "ANTHROPIC_WORKSPACE_ID"
+
+      assert is_binary(conn.host)
+    end
+
+    test "explain_failure prefers the API's own message when it has one" do
+      error = ~s({:http, 400, %{"error" => %{"message" => "Something specific went wrong here"}}})
+
+      assert JidoSwarmWeb.ChatLive.explain_failure(error) == "Something specific went wrong here"
+    end
+
+    test "explain_failure names the common misconfigurations" do
+      assert JidoSwarmWeb.ChatLive.explain_failure("no_github_token") =~ "GITHUB_TOKEN"
+      assert JidoSwarmWeb.ChatLive.explain_failure("No Anthropic API key") =~ "ANTHROPIC_API_KEY"
+      assert JidoSwarmWeb.ChatLive.explain_failure(nil) =~ "Unknown"
+    end
+
     test "queueing a survey reports back", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/")
 

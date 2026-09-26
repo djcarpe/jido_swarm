@@ -120,6 +120,7 @@ defmodule JidoSwarm.Swarm do
       workers: worker_ids(),
       autoscaler: JidoSwarm.Swarm.Autoscaler.config(),
       history: Queue.history(),
+      failures: Queue.recent_failures(),
       providers: JidoSwarm.LLM.providers(),
       can_publish?: JidoSwarm.Repos.can_publish?(),
       publish_hint: JidoSwarm.Repos.publish_hint()

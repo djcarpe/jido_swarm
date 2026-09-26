@@ -83,6 +83,16 @@ defmodule JidoSwarm.Swarm.Queue do
   def history, do: GenServer.call(@name, :history)
 
   @doc """
+  The most recent distinct failure reasons, newest first.
+
+  A swarm whose every job fails for one reason is the common case — a missing
+  credential, an unreachable model — and it is far more useful to say that once,
+  loudly, than to list forty identical rows in a history nobody scrolls to.
+  """
+  @spec recent_failures(pos_integer()) :: [map()]
+  def recent_failures(limit \\ 3), do: GenServer.call(@name, {:recent_failures, limit})
+
+  @doc """
   The ids of workers currently idle.
 
   The autoscaler retires from this list: a worker that is not holding a job can
@@ -139,6 +149,16 @@ defmodule JidoSwarm.Swarm.Queue do
   end
 
   def handle_call(:history, _from, state), do: {:reply, state.history, state}
+
+  def handle_call({:recent_failures, limit}, _from, state) do
+    failures =
+      state.history
+      |> Enum.filter(&(&1.status == :failed and &1.error not in [nil, ""]))
+      |> Enum.uniq_by(& &1.error)
+      |> Enum.take(limit)
+
+    {:reply, failures, state}
+  end
 
   def handle_call(:idle_worker_ids, _from, state) do
     {:reply, Enum.map(state.idle, &elem(&1, 0)), state}

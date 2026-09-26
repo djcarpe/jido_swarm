@@ -1,0 +1,132 @@
+# Pull-based deployment.
+#
+# GitHub Actions builds and pushes to GHCR; nothing reaches into the cluster.
+# That is not a preference — this homelab is behind NAT, so a push-based
+# pipeline would need an inbound path from GitHub that does not exist. The
+# cluster polls instead.
+#
+# Every two minutes this resolves what `:latest` currently points at in GHCR
+# and compares it to the digest the StatefulSet is pinned to. When they differ
+# it patches the StatefulSet to the *digest*, which is what makes the rollout
+# both deterministic and a real trigger — patching to the same `:latest` tag
+# would change nothing and Kubernetes would not roll anything out.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jido-swarm-image-sync
+  namespace: jido-swarm
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jido-swarm-image-sync
+  namespace: jido-swarm
+rules:
+  # Deliberately narrow: this can read and patch one workload in one namespace,
+  # and nothing else. A credential that can roll out code is worth scoping.
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    resourceNames: ["jido-swarm"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jido-swarm-image-sync
+  namespace: jido-swarm
+subjects:
+  - kind: ServiceAccount
+    name: jido-swarm-image-sync
+    namespace: jido-swarm
+roleRef:
+  kind: Role
+  name: jido-swarm-image-sync
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jido-swarm-image-sync
+  namespace: jido-swarm
+data:
+  sync.sh: |
+    #!/bin/sh
+    # Resolve the digest behind :latest, and roll out if it moved.
+    set -eu
+
+    IMAGE="${IMAGE:?IMAGE is required}"
+    NAMESPACE="${NAMESPACE:-jido-swarm}"
+    WORKLOAD="${WORKLOAD:-jido-swarm}"
+
+    echo "resolving ${IMAGE}"
+    DIGEST="$(crane digest "${IMAGE}" 2>/dev/null || true)"
+
+    if [ -z "${DIGEST}" ]; then
+      # A registry hiccup is not a reason to disturb a healthy rollout.
+      echo "could not resolve ${IMAGE}; leaving the workload alone"
+      exit 0
+    fi
+
+    REPO="${IMAGE%%:*}"
+    WANTED="${REPO}@${DIGEST}"
+
+    CURRENT="$(kubectl -n "${NAMESPACE}" get statefulset "${WORKLOAD}" \
+      -o jsonpath='{.spec.template.spec.containers[0].image}')"
+
+    if [ "${CURRENT}" = "${WANTED}" ]; then
+      echo "already at ${DIGEST}"
+      exit 0
+    fi
+
+    echo "rolling out ${CURRENT} -> ${WANTED}"
+    kubectl -n "${NAMESPACE}" patch statefulset "${WORKLOAD}" --type=strategic -p \
+      "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"jido-swarm\",\"image\":\"${WANTED}\"}]}}}}"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: jido-swarm-image-sync
+  namespace: jido-swarm
+spec:
+  schedule: "*/2 * * * *"
+  # Overlapping runs would race each other into the same patch.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          serviceAccountName: jido-swarm-image-sync
+          restartPolicy: Never
+          containers:
+            - name: sync
+              # Carries both crane (to resolve the digest without pulling the
+              # image) and kubectl.
+              image: alpine/k8s:1.30.4
+              command: ["/bin/sh", "/scripts/sync.sh"]
+              env:
+                - name: IMAGE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: jido-swarm
+                      key: DEPLOY_IMAGE
+                - name: NAMESPACE
+                  value: jido-swarm
+                - name: WORKLOAD
+                  value: jido-swarm
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+          volumes:
+            - name: scripts
+              configMap:
+                name: jido-swarm-image-sync
+                defaultMode: 0755

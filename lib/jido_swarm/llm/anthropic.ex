@@ -81,11 +81,7 @@ defmodule JidoSwarm.LLM.Anthropic do
       Req.new(
         url: @api_url,
         json: body,
-        headers: [
-          {"x-api-key", api_key()},
-          {"anthropic-version", @api_version},
-          {"anthropic-beta", @fallback_beta}
-        ],
+        headers: headers(),
         receive_timeout: opts[:timeout] || timeout(),
         retry: :transient,
         max_retries: 2
@@ -96,6 +92,39 @@ defmodule JidoSwarm.LLM.Anthropic do
       {:ok, %{status: status, body: body}} -> {:error, {:http, status, body}}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  # An organization-scoped key has no default workspace, so the API rejects
+  # every request with `invalid_request_error` until it is told which workspace
+  # to bill and attribute to. A workspace-scoped key carries that implicitly and
+  # needs no header — which is why this is optional rather than required.
+  defp headers do
+    base = [
+      {"x-api-key", api_key()},
+      {"anthropic-version", @api_version},
+      {"anthropic-beta", @fallback_beta}
+    ]
+
+    case workspace_id() do
+      nil -> base
+      id -> [{"anthropic-workspace-id", id} | base]
+    end
+  end
+
+  @doc """
+  The configured workspace, if any.
+
+  Only needed for an organization-scoped key. See `headers/0`.
+  """
+  @spec workspace_id() :: String.t() | nil
+  def workspace_id do
+    JidoSwarm.LLM.provider_config(:anthropic)
+    |> Keyword.get(:workspace_id)
+    |> case do
+      nil -> System.get_env("ANTHROPIC_WORKSPACE_ID")
+      id -> id
+    end
+    |> presence()
   end
 
   # ===========================================================================
@@ -109,6 +138,7 @@ defmodule JidoSwarm.LLM.Anthropic do
     {system, turns}
   end
 
+  defp presence(nil), do: nil
   defp presence(""), do: nil
   defp presence(value), do: value
 

@@ -60,13 +60,19 @@ defmodule Jido.Context.Engine.Glider do
 
   @impl true
   def open(location) do
-    guarded(fn ->
-      case location do
-        :memory -> apply(@glider, :open, [])
-        {:file, path, sync} -> open_file(path, sync)
-      end
+    span(:open, %{location: location_kind(location)}, fn ->
+      guarded(fn ->
+        case location do
+          :memory -> apply(@glider, :open, [])
+          {:file, path, sync} -> open_file(path, sync)
+        end
+      end)
     end)
   end
+
+  defp location_kind(:memory), do: :memory
+  defp location_kind({:file, _, sync}), do: {:file, sync}
+  defp location_kind(other), do: other
 
   defp open_file(path, sync) do
     with :ok <- ensure_parent_dir(path) do
@@ -82,29 +88,45 @@ defmodule Jido.Context.Engine.Glider do
   end
 
   @impl true
-  def run(db, statement), do: guarded(fn -> apply(@glider, :run, [db, statement]) end)
-
-  @impl true
-  def query(db, statement) do
-    guarded(fn ->
-      case apply(@glider, :query, [db, statement]) do
-        {:ok, result} -> {:ok, %{columns: result.columns, rows: result.rows}}
-        {:error, reason} -> {:error, reason}
-      end
+  def run(db, statement) do
+    span(:run, statement_metadata(statement), fn ->
+      guarded(fn -> apply(@glider, :run, [db, statement]) end)
     end)
   end
 
   @impl true
-  def export(db), do: guarded(fn -> apply(@glider, :export_jsonl, [db]) end)
+  def query(db, statement) do
+    span(:query, statement_metadata(statement), fn ->
+      guarded(fn ->
+        case apply(@glider, :query, [db, statement]) do
+          {:ok, result} -> {:ok, %{columns: result.columns, rows: result.rows}}
+          {:error, reason} -> {:error, reason}
+        end
+      end)
+    end)
+  end
 
   @impl true
-  def import(db, jsonl), do: guarded(fn -> apply(@glider, :import_jsonl, [db, jsonl]) end)
+  def export(db) do
+    span(:export, %{}, fn -> guarded(fn -> apply(@glider, :export_jsonl, [db]) end) end)
+  end
 
   @impl true
-  def checkpoint(db), do: guarded(fn -> apply(@glider, :checkpoint, [db]) end)
+  def import(db, jsonl) do
+    span(:import, %{bytes: byte_size(jsonl)}, fn ->
+      guarded(fn -> apply(@glider, :import_jsonl, [db, jsonl]) end)
+    end)
+  end
 
   @impl true
-  def stats(db), do: guarded(fn -> apply(@glider, :stats, [db]) end)
+  def checkpoint(db) do
+    span(:checkpoint, %{}, fn -> guarded(fn -> apply(@glider, :checkpoint, [db]) end) end)
+  end
+
+  @impl true
+  def stats(db) do
+    span(:stats, %{}, fn -> guarded(fn -> apply(@glider, :stats, [db]) end) end)
+  end
 
   @impl true
   def close(db) do
@@ -114,6 +136,88 @@ defmodule Jido.Context.Engine.Glider do
       :ok
     end
   end
+
+  # ===========================================================================
+  # Instrumentation
+  # ===========================================================================
+
+  @doc """
+  Telemetry emitted by this engine.
+
+  Every call to the graph is wrapped in a `:telemetry.span/3`, so each one
+  produces `[:jido, :context, :glider, <op>, :start | :stop | :exception]`.
+
+  | Operation | Emitted for |
+  |---|---|
+  | `:open` | opening a graph, with `:location` |
+  | `:query` | a read, with `:rows` returned |
+  | `:run` | a write, with `:touched` entities |
+  | `:import` / `:export` | bulk load and dump, with `:bytes` |
+  | `:checkpoint` / `:stats` | flush and counters |
+
+  `:stop` measurements always carry `:duration` (native units, as
+  `:telemetry.span/3` produces) and metadata always carries `:result`, which is
+  `:ok` or `:error` — a failed query is still a completed measurement, and
+  counting it as one is the difference between "slow" and "broken" being
+  visible separately.
+
+  Queries additionally carry `:operation` — the leading Cypher keyword, upcased
+  — and `:statement_bytes`. The keyword is the useful grouping dimension: it
+  separates a `MATCH` costing milliseconds from a `CALL pagerank` costing
+  seconds, without recording the statement text itself, which would put user
+  data into telemetry.
+
+  ## Why here rather than in the caller
+
+  This is the only place every graph operation passes through. Instrumenting
+  `Jido.Context.Graph` would miss direct engine use, and instrumenting inside
+  Glider would mean measuring in Rust across a NIF boundary. The engine
+  behaviour is the seam where a measurement is both complete and cheap.
+  """
+  @spec telemetry_events() :: [[atom()]]
+  def telemetry_events do
+    for op <- [:open, :query, :run, :import, :export, :checkpoint, :stats],
+        suffix <- [:start, :stop, :exception] do
+      [:jido, :context, :glider, op, suffix]
+    end
+  end
+
+  defp span(op, metadata, fun) do
+    :telemetry.span([:jido, :context, :glider, op], metadata, fn ->
+      result = fun.()
+      {result, Map.merge(metadata, result_metadata(result))}
+    end)
+  end
+
+  # The shape of a result is the measurement worth keeping: how much came back,
+  # and whether it worked at all.
+  defp result_metadata({:ok, %{rows: rows}}) when is_list(rows),
+    do: %{result: :ok, rows: length(rows)}
+
+  defp result_metadata({:ok, touched}) when is_integer(touched),
+    do: %{result: :ok, touched: touched}
+
+  defp result_metadata({:ok, _}), do: %{result: :ok}
+  defp result_metadata(:ok), do: %{result: :ok}
+  defp result_metadata({:error, reason}), do: %{result: :error, error: reason}
+  defp result_metadata(_), do: %{result: :ok}
+
+  # The leading keyword, which is what distinguishes a cheap read from an
+  # expensive algorithm. Deliberately not the statement itself: that can carry
+  # entity keys and property values, which do not belong in telemetry metadata.
+  defp statement_metadata(statement) when is_binary(statement) do
+    operation =
+      statement
+      |> String.trim_leading()
+      |> String.split(~r/\s/, parts: 2)
+      |> List.first()
+      |> to_string()
+      |> String.upcase()
+
+    %{operation: operation, statement_bytes: byte_size(statement)}
+  end
+
+  defp statement_metadata(_), do: %{operation: "UNKNOWN", statement_bytes: 0}
 
   # Glider is resolved at runtime, so every entry point checks first rather
   # than letting an application without the optional dependency fail with an

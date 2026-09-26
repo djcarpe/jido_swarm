@@ -28,15 +28,22 @@ with the test suite run, and a pull request opened.
 
 ## Running it
 
-Needs Elixir 1.18+, and [Ollama](https://ollama.com) with a tool-capable model:
+Needs Elixir 1.18+ and an Anthropic API key:
 
 ```sh
-ollama pull qwen3:4b-instruct
+export ANTHROPIC_API_KEY=sk-ant-...
 mix deps.get
 mix phx.server
 ```
 
 Then open http://localhost:4000 and press **Run a cycle**.
+
+To run against a local model instead, point it at [Ollama](https://ollama.com):
+
+```sh
+ollama pull qwen3:4b-instruct
+LLM_PROVIDER=ollama mix phx.server
+```
 
 ## What the parts are
 
@@ -53,17 +60,27 @@ Then open http://localhost:4000 and press **Run a cycle**.
 
 ## The model
 
-Ollama by default, so it runs with no API key:
+Claude by default (`claude-opus-5`, adaptive thinking on), with the local model
+as the opt-out. The prompts are provider-neutral and each provider translates
+at the edge, so switching changes nothing but the answers' quality.
+
+| Variable | |
+|---|---|
+| `ANTHROPIC_API_KEY` | required |
+| `ANTHROPIC_WORKSPACE_ID` | only for an **organization-scoped** key |
+| `LLM_PROVIDER=ollama` | use the local model instead |
+
+> **An org-scoped key needs a workspace.** Anthropic rejects every request from
+> one with `invalid_request_error` until it is told which workspace to bill,
+> and the swarm surfaces that as every job failing. Either set
+> `ANTHROPIC_WORKSPACE_ID`, or use a workspace-scoped key, which carries its
+> workspace implicitly.
+
+### The local model
 
 ```elixir
-config :jido_swarm, JidoSwarm.LLM,
-  provider: JidoSwarm.LLM.Ollama,
-  ollama: [base_url: "http://127.0.0.1:11434", model: "qwen3:4b-instruct", num_ctx: 16_384]
+ollama: [base_url: "http://127.0.0.1:11434", model: "qwen3:4b-instruct", num_ctx: 16_384]
 ```
-
-Switching to Claude is two environment variables — `ANTHROPIC_API_KEY` and
-`LLM_PROVIDER=anthropic`. Nothing else changes: the prompts are
-provider-neutral, and the providers translate at the edge.
 
 > **`num_ctx` is not optional.** Ollama defaults to a 4096-token window
 > regardless of what the model advertises. `qwen3:4b-instruct` claims 262144 and
@@ -127,16 +144,89 @@ not do:
 Without `GITHUB_TOKEN` the work still happens — it stops after the commit, and
 the attempt says so.
 
+## Instrumentation
+
+Every call into Glider is wrapped in `:telemetry.span/3`, so the graph is
+measured at the one seam every operation passes through:
+
+```
+[:jido, :context, :glider, <op>, :start | :stop | :exception]
+```
+
+for `open`, `query`, `run`, `import`, `export`, `checkpoint` and `stats`.
+`JidoSwarm.GliderMetrics` collects them and the **Glider** tab shows:
+
+| | |
+|---|---|
+| Usage | operations, time spent in Glider, rows read, entities written |
+| Latency | p50 / p95 / p99 / max, per operation |
+| Errors | per operation and overall, as a rate |
+| Throughput | operations per second over the last five minutes |
+| Shape | calls grouped by Cypher keyword |
+
+Three decisions worth knowing:
+
+**Percentiles, not averages.** Graph work is bimodal — an indexed lookup is
+microseconds, a `CALL pagerank` is seconds — so a mean sits in the empty space
+between the two and describes nothing that ever happens.
+
+**Failures are measured, not just logged.** A failed query emits a `:stop` with
+`result: :error`. An operation that emitted nothing on failure would make an
+outage read as idleness.
+
+**The statement text is never recorded**, only its leading keyword. That
+separates a `MATCH` from a `CALL` without putting entity keys and property
+values into telemetry. There is a test asserting a secret property value never
+reaches metadata.
+
+Collection writes straight to ETS from the calling process rather than through
+a GenServer: a collector on the hot path of every graph operation would
+serialise all graph work behind one mailbox and become the bottleneck it exists
+to measure.
+
 ## Deploying
 
 ```sh
-docker build -t jido-swarm:latest .
 kubectl apply -f k8s/
 ```
 
-See `k8s/` for the manifests and `k8s/21-secret.example.yaml` for what they
-need. The only genuinely required secret is `SECRET_KEY_BASE`; everything else
-degrades rather than failing.
+`k8s/examples/secret.example.yaml` lists what the Secret needs. It is in a
+subdirectory deliberately — `kubectl apply -f k8s/` is not recursive, so the
+example cannot overwrite a working Secret with its empty placeholders.
+
+Required: `SECRET_KEY_BASE`, `RELEASE_COOKIE`, and `ANTHROPIC_API_KEY`.
+`GITHUB_TOKEN` is optional (without it the swarm implements and tests but does
+not push). `ANTHROPIC_WORKSPACE_ID` is needed **only for an organization-scoped
+key** — a workspace-scoped key carries its workspace implicitly.
+
+### Durability
+
+A StatefulSet, not a Deployment, for two reasons that both come from the mesh:
+
+- **Per-replica PVCs**, so a graph survives rescheduling. The mesh can rebuild
+  a lost replica from its peers, but only while a peer is up — a simultaneous
+  restart of every pod would otherwise lose everything learned.
+- **Stable identities.** A pod's name is its origin in the mesh, and the mesh
+  orders writes by `{seq, origin}`. Deployment pods get a fresh random name on
+  every restart, so a replica's history became a stranger's each time it came
+  back.
+
+### GitOps
+
+Push to `main` and the cluster picks it up:
+
+```
+GitHub Actions ──build──▶ GHCR ◀──poll── CronJob ──patch──▶ StatefulSet
+```
+
+Pull-based because this homelab is behind NAT — a push pipeline would need an
+inbound path from GitHub that does not exist. The syncer resolves what `:latest`
+points at and patches the StatefulSet to that **digest**, which is what makes
+the rollout deterministic and a real trigger; patching back to the same tag
+would change nothing and roll out nothing.
+
+Its RBAC is one verb on one workload in one namespace. A credential that can
+deploy code is worth scoping.
 
 Deployed pods reach the model through `ollama-external`, a Service with
 hand-managed Endpoints pointing at the workstation. Ollama binds `127.0.0.1` by
