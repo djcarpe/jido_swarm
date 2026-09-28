@@ -87,8 +87,24 @@ defmodule JidoSwarm.Swarm.Autoscaler do
   # Policy
   # ===========================================================================
 
+  defp hive_backlog do
+    graph = JidoSwarm.Hive.Store.graph()
+
+    if Process.whereis(Jido.Context.Graph.process_name(graph)) do
+      JidoSwarm.Hive.tasks() |> Enum.count(&(&1.status == "open"))
+    else
+      0
+    end
+  rescue
+    _ -> 0
+  catch
+    :exit, _ -> 0
+  end
+
   defp decide(state) do
-    stats = Queue.stats()
+    # Open tasks on the Hive board are work too: an idle worker picks them up
+    # by itself, so they count as pending when deciding to scale out.
+    stats = Queue.stats() |> Map.update!(:pending, &(&1 + hive_backlog()))
     config = state.config
     now = System.monotonic_time(:millisecond)
 
@@ -96,7 +112,9 @@ defmodule JidoSwarm.Swarm.Autoscaler do
       # Below the floor — something died, or we just started.
       stats.workers < config.min_workers ->
         started = start_workers(config.min_workers - stats.workers)
-        {%{action: :scale_out, started: started, reason: :below_minimum}, %{state | idle_since: nil}}
+
+        {%{action: :scale_out, started: started, reason: :below_minimum},
+         %{state | idle_since: nil}}
 
       # Work is queued and nobody is free to take it.
       stats.pending > 0 and stats.idle == 0 and stats.workers < config.max_workers ->

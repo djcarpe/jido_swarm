@@ -14,6 +14,11 @@ defmodule JidoSwarmWeb.Router do
     plug :accepts, ["json"]
   end
 
+  # MCP clients send `Accept: application/json, text/event-stream`; the server
+  # answers JSON, so there is no content negotiation to do.
+  pipeline :mcp do
+  end
+
   scope "/", JidoSwarmWeb do
     pipe_through :browser
 
@@ -27,6 +32,15 @@ defmodule JidoSwarmWeb.Router do
 
     get "/", HealthController, :show
     get "/ready", HealthController, :ready
+  end
+
+  # The Hive over the Model Context Protocol: external agents join the swarm here.
+  scope "/mcp", JidoSwarmWeb do
+    pipe_through :mcp
+
+    post "/", MCPController, :post
+    get "/", MCPController, :get
+    delete "/", MCPController, :delete
   end
 
   # Other scopes may use custom stacks.

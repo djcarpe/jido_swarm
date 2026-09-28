@@ -21,7 +21,8 @@ defmodule JidoSwarm.Swarm.WorkerAgent do
 
   use Jido.Agent,
     name: "swarm_worker",
-    description: "A swarm member that surveys repositories, proposes features, and implements them",
+    description:
+      "A swarm member that surveys repositories, proposes features, and implements them",
     schema: [
       jobs_run: [type: :integer, default: 0],
       last_job: [type: :string, default: ""]
@@ -33,7 +34,8 @@ defmodule JidoSwarm.Swarm.WorkerAgent do
       {"swarm.survey", JidoSwarm.Actions.Survey},
       {"swarm.propose", JidoSwarm.Actions.Propose},
       {"swarm.implement", JidoSwarm.Actions.Implement},
-      {"swarm.chat", JidoSwarm.Actions.Chat}
+      {"swarm.chat", JidoSwarm.Actions.Chat},
+      {"swarm.hive", JidoSwarm.Actions.HiveWork}
     ]
   end
 end

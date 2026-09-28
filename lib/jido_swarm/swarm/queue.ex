@@ -63,6 +63,14 @@ defmodule JidoSwarm.Swarm.Queue do
   @spec ready(String.t(), pid()) :: {:job, Job.t()} | :idle
   def ready(worker_id, pid \\ self()), do: GenServer.call(@name, {:ready, worker_id, pid})
 
+  @doc """
+  Marks an idle worker busy with a job it found itself (a Hive task), so the
+  queue does not dispatch to it and the dashboard shows what it is doing.
+  Returns the job as running.
+  """
+  @spec busy(String.t(), Job.t()) :: Job.t()
+  def busy(worker_id, %Job{} = job), do: GenServer.call(@name, {:busy, worker_id, job})
+
   @doc "Reports a finished job."
   @spec complete(String.t(), Job.t(), :ok | {:error, term()}) :: :ok
   def complete(worker_id, %Job{} = job, outcome),
@@ -135,6 +143,17 @@ defmodule JidoSwarm.Swarm.Queue do
     end
   end
 
+  def handle_call({:busy, worker_id, job}, _from, state) do
+    started = running(job, worker_id)
+
+    {:reply, started,
+     %{
+       state
+       | idle: List.keydelete(state.idle, worker_id, 0),
+         busy: Map.put(state.busy, worker_id, started)
+     }}
+  end
+
   def handle_call(:stats, _from, state) do
     {:reply,
      %{
@@ -189,7 +208,6 @@ defmodule JidoSwarm.Swarm.Queue do
     broadcast({:completed, finished})
     {:noreply, maybe_chain(state, finished, outcome)}
   end
-
 
   def handle_cast({:leave, worker_id}, state) do
     {:noreply,

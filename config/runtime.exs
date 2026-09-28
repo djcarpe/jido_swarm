@@ -38,7 +38,6 @@ if config_env() == :dev do
     ]
 end
 
-
 # ---------------------------------------------------------------------------
 # Swarm runtime configuration
 #
@@ -77,6 +76,16 @@ config :jido_swarm, JidoSwarm.Swarm.Autoscaler,
   scale_step: String.to_integer(System.get_env("SWARM_SCALE_STEP", "2")),
   interval: String.to_integer(System.get_env("SWARM_INTERVAL_MS", "2000")),
   idle_ttl: String.to_integer(System.get_env("SWARM_IDLE_TTL_MS", "30000"))
+
+# The Hive. SWARM_MCP_TOKEN guards /mcp (unset: open, fine on localhost only);
+# idle workers look at the board every SWARM_HIVE_POLL_MS, and join it with
+# SWARM_WORKER_SKILLS.
+config :jido_swarm,
+  mcp_token: System.get_env("SWARM_MCP_TOKEN"),
+  hive_poll_ms: String.to_integer(System.get_env("SWARM_HIVE_POLL_MS", "5000")),
+  worker_skills:
+    System.get_env("SWARM_WORKER_SKILLS", "elixir,rust,research,design,writing,review")
+    |> String.split(",", trim: true)
 
 # Only the workspace and identity are overridden here. The repository list
 # itself stays in config.exs: each entry's `:source` is a local checkout that

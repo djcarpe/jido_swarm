@@ -45,6 +45,22 @@ ollama pull qwen3:4b-instruct
 LLM_PROVIDER=ollama mix phx.server
 ```
 
+## The Hive: a self-organising swarm, and MCP
+
+Besides the queue, the swarm can run with **no dispatcher at all**: goals,
+tasks, leases, knowledge and conversation live in the shared graph, and every
+agent — the Jido workers here, workers on other pods, or Claude Code over MCP —
+reads the board and picks its own work. Idle workers do this automatically.
+
+```sh
+claude mcp add --transport http hive http://localhost:4000/mcp   # join from Claude Code
+```
+
+Leases that heal by time, a scheduler every agent runs identically, context
+packs that brief a newcomer from what others wrote, weighted and disputable
+insights, skill-routed questions — all converging over the mesh by
+construction. See [`docs/HIVE.md`](docs/HIVE.md).
+
 ## What the parts are
 
 | Module | Role |
@@ -57,6 +73,8 @@ LLM_PROVIDER=ollama mix phx.server
 | `JidoSwarm.LLM` | the model — local Ollama, or Claude |
 | `JidoSwarm.Repos` | the repositories, cloning, branching, testing, PRs |
 | `JidoSwarmWeb.ChatLive` | the operator's view of all of it |
+| `JidoSwarm.Hive` | the self-organising board: goals, tasks, leases, shared memory, context packs |
+| `JidoSwarm.MCP` | the Hive as MCP tools, resources and prompts at `/mcp`; `mix hive.mcp` for stdio |
 
 ## The model
 

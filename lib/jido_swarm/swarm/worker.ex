@@ -77,6 +77,16 @@ defmodule JidoSwarm.Swarm.Worker do
            jido: JidoSwarm.Jido
          ) do
       {:ok, agent_pid} ->
+        hive(fn ->
+          JidoSwarm.Hive.join(
+            id: id,
+            name: id,
+            kind: "worker",
+            skills: worker_skills(),
+            model: model()
+          )
+        end)
+
         send(self(), :pull)
         {:ok, %State{id: id, agent_pid: agent_pid}}
 
@@ -89,7 +99,7 @@ defmodule JidoSwarm.Swarm.Worker do
   def handle_info(:pull, %State{task: nil} = state) do
     case Queue.ready(state.id, self()) do
       {:job, job} -> {:noreply, start_job(state, job)}
-      :idle -> {:noreply, state}
+      :idle -> {:noreply, from_hive(state)}
     end
   end
 
@@ -131,8 +141,63 @@ defmodule JidoSwarm.Swarm.Worker do
 
   @impl true
   def terminate(_reason, state) do
-    if state.id, do: Queue.leave(state.id)
+    if state.id do
+      Queue.leave(state.id)
+      hive(fn -> JidoSwarm.Hive.leave(state.id) end)
+    end
+
     :ok
+  end
+
+  # ===========================================================================
+  # The Hive
+  # ===========================================================================
+
+  # Nothing queued: pick a task off the shared board, as any Hive member would.
+  # With nothing there either, look again later — the board changes without
+  # anyone telling this worker, which is the point of it.
+  defp from_hive(state) do
+    case hive(fn -> JidoSwarm.Hive.next_task(state.id) end) do
+      {:ok, %{task: task, context: context}} ->
+        job =
+          Queue.busy(
+            state.id,
+            Job.new(:hive, payload: %{task: task.key, title: task.title, context: context})
+          )
+
+        start_job(state, job)
+
+      _ ->
+        Process.send_after(self(), :pull, Application.get_env(:jido_swarm, :hive_poll_ms, 5_000))
+        state
+    end
+  end
+
+  # The Hive needs the graph; a node without the engine still runs queued work.
+  defp hive(fun) do
+    if Process.whereis(Jido.Context.Graph.process_name(JidoSwarm.Hive.Store.graph())) do
+      fun.()
+    else
+      :unavailable
+    end
+  rescue
+    e ->
+      Logger.warning("hive unavailable: #{Exception.message(e)}")
+      :unavailable
+  catch
+    :exit, _ -> :unavailable
+  end
+
+  defp worker_skills,
+    do: Application.get_env(:jido_swarm, :worker_skills, ~w(elixir research design writing))
+
+  defp model do
+    case JidoSwarm.LLM.provider_config(:anthropic)[:model] do
+      nil -> ""
+      m -> to_string(m)
+    end
+  rescue
+    _ -> ""
   end
 
   # ===========================================================================
@@ -218,10 +283,20 @@ defmodule JidoSwarm.Swarm.Worker do
     signal("swarm.chat", %{prompt: job.prompt, worker: worker, job_id: job.id})
   end
 
+  defp signal_for(%Job{type: :hive, payload: p} = job, worker) do
+    signal("swarm.hive", %{
+      task: p.task,
+      context: p[:context] || "",
+      worker: worker,
+      job_id: job.id
+    })
+  end
+
   defp signal(type, data), do: Signal.new!(type, data, source: "/swarm/worker")
 
   # Implementation runs a full test suite; the others are one model call.
   defp job_timeout(%Job{type: :implement}), do: 900_000
+  defp job_timeout(%Job{type: :hive}), do: 600_000
   defp job_timeout(_), do: 300_000
 
   defp reply(%Job{reply_to: pid, id: id}, result) when is_pid(pid) do

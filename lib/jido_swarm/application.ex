@@ -7,6 +7,8 @@ defmodule JidoSwarm.Application do
 
   @impl true
   def start(_type, _args) do
+    JidoSwarm.MCP.init()
+
     children =
       [
         JidoSwarmWeb.Telemetry,
@@ -97,7 +99,8 @@ defmodule JidoSwarm.Application do
       name: JidoSwarm.graph(),
       origin: origin(),
       mesh: JidoSwarm.mesh(),
-      topics: ["knowledge.**", "context.**"],
+      # hive.** carries the self-organising board (JidoSwarm.Hive).
+      topics: ["knowledge.**", "context.**", "hive.**"],
       default_topic: "knowledge.findings",
       location: Keyword.get(config, :location, :memory),
       store: Keyword.get(config, :store),

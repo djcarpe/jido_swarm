@@ -12,6 +12,7 @@ defmodule JidoSwarm.Job do
   | `:propose` | turn findings into a concrete feature proposal |
   | `:implement` | implement a proposal on a branch, run the tests, open a PR |
   | `:chat` | answer the operator, grounded in the knowledge graph |
+  | `:hive` | work a task the worker claimed from the Hive board itself (`payload.task`) |
 
   `:chat` carries a `reply_to` pid so the LiveView that asked gets the answer
   directly; the other types report only into the graph, and the UI reacts to the
@@ -35,7 +36,7 @@ defmodule JidoSwarm.Job do
     finished_at: nil
   ]
 
-  @type type :: :survey | :propose | :implement | :chat
+  @type type :: :survey | :propose | :implement | :chat | :hive
   @type status :: :pending | :running | :done | :failed
 
   @type t :: %__MODULE__{
@@ -56,7 +57,7 @@ defmodule JidoSwarm.Job do
 
   @doc "Builds a job."
   @spec new(type(), keyword()) :: t()
-  def new(type, opts \\ []) when type in [:survey, :propose, :implement, :chat] do
+  def new(type, opts \\ []) when type in [:survey, :propose, :implement, :chat, :hive] do
     %__MODULE__{
       id: opts[:id] || generate_id(),
       type: type,
@@ -78,6 +79,9 @@ defmodule JidoSwarm.Job do
     do: "implement #{String.replace_prefix(key || "", "proposal:", "")}"
 
   def label(%__MODULE__{type: :chat, prompt: prompt}), do: "chat: #{truncate(prompt, 40)}"
+
+  def label(%__MODULE__{type: :hive, payload: payload}),
+    do: "hive: #{truncate(Map.get(payload, :title) || Map.get(payload, :task) || "", 40)}"
 
   defp truncate(nil, _), do: ""
 
