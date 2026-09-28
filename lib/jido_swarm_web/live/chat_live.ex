@@ -19,12 +19,18 @@ defmodule JidoSwarmWeb.ChatLive do
 
   use JidoSwarmWeb, :live_view
 
+  import JidoSwarmWeb.HiveComponents
+
+  alias JidoSwarm.Hive.Canvas
+  alias JidoSwarm.Hive.Feed
   alias JidoSwarm.Knowledge
   alias JidoSwarm.Swarm
 
   @refresh_interval 2_000
   @hive_debounce 500
   @hive_tick 10_000
+  @peers_interval 5_000
+  @ticker_length 30
 
   @impl true
   def mount(_params, _session, socket) do
@@ -33,6 +39,7 @@ defmodule JidoSwarmWeb.ChatLive do
       Phoenix.PubSub.subscribe(JidoSwarm.PubSub, "hive")
       :timer.send_interval(@refresh_interval, self(), :refresh)
       :timer.send_interval(@hive_tick, self(), :hive_tick)
+      :timer.send_interval(@peers_interval, self(), :hive_peers)
     end
 
     {:ok,
@@ -42,7 +49,9 @@ defmodule JidoSwarmWeb.ChatLive do
      |> assign(:tab, :findings)
      |> assign(:hive_refresh_pending?, false)
      |> load()
-     |> load_hive()}
+     |> load_hive()
+     |> load_mesh()
+     |> poll_peers()}
   end
 
   # ===========================================================================
@@ -197,21 +206,40 @@ defmodule JidoSwarmWeb.ChatLive do
   def handle_info({:swarm_event, _event}, socket), do: {:noreply, load(socket)}
   def handle_info(:refresh, socket), do: {:noreply, load(socket)}
 
-  # A change to the board, from anywhere in the mesh. One re-read per burst:
-  # the first delta starts the clock, the rest ride along.
-  def handle_info({:hive_delta, %{topic: "hive." <> _}}, socket) do
-    {:noreply, schedule_hive_refresh(socket)}
+  # A delta from anywhere in the mesh goes on the ticker at once; a change to
+  # the board also re-reads it, one re-read per burst — the first delta starts
+  # the clock, the rest ride along.
+  def handle_info({:hive_delta, entry}, socket) do
+    socket = tick(socket, entry)
+
+    case entry.topic do
+      "hive." <> _ -> {:noreply, schedule_hive_refresh(socket)}
+      _ -> {:noreply, socket}
+    end
   end
 
-  def handle_info({:hive_delta, _entry}, socket), do: {:noreply, socket}
-  def handle_info({:hive_burst, _count}, socket), do: {:noreply, schedule_hive_refresh(socket)}
+  def handle_info({:hive_burst, _count}, socket) do
+    {:noreply, socket |> load_mesh() |> schedule_hive_refresh()}
+  end
 
   def handle_info(:hive_refresh, socket) do
     {:noreply, socket |> assign(:hive_refresh_pending?, false) |> load_hive()}
   end
 
   def handle_info(:hive_tick, socket), do: {:noreply, load_hive(socket)}
+  def handle_info(:hive_peers, socket), do: {:noreply, poll_peers(socket)}
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  # Asking the other pods what they have seen is a network round trip, so it
+  # runs off the render path with a short timeout; a partitioned pod reads as
+  # unreachable rather than freezing the page.
+  @impl true
+  def handle_async(:hive_peers, {:ok, {peers, authorship}}, socket) do
+    mesh = %{socket.assigns.mesh | peers: peers, authorship: authorship}
+    {:noreply, assign(socket, :mesh, mesh)}
+  end
+
+  def handle_async(:hive_peers, _failed, socket), do: {:noreply, socket}
 
   defp schedule_hive_refresh(%{assigns: %{hive_refresh_pending?: true}} = socket), do: socket
 
@@ -254,6 +282,84 @@ defmodule JidoSwarmWeb.ChatLive do
     _ -> empty_hive()
   catch
     :exit, _ -> empty_hive()
+  end
+
+  # ---------------------------------------------------------------------------
+  # The mesh: this replica, the origins it has heard from, the wire
+  # ---------------------------------------------------------------------------
+
+  # Everything the feed already holds, read in one go: on mount, and again
+  # after a burst, when the ticker would otherwise have skipped the middle.
+  defp load_mesh(socket) do
+    mesh =
+      if feed_up?() do
+        me = Feed.me()
+        origins = Feed.origins()
+        recent = Feed.recent(@ticker_length)
+        previous = socket.assigns[:mesh]
+
+        %{
+          me: me,
+          origins: origins,
+          recent: recent,
+          peers: (previous && previous.peers) || [],
+          authorship: (previous && previous.authorship) || empty_authorship(),
+          colors: colors(origins, recent, me.origin)
+        }
+      else
+        empty_mesh()
+      end
+
+    assign(socket, :mesh, mesh)
+  rescue
+    _ -> assign(socket, :mesh, empty_mesh())
+  catch
+    :exit, _ -> assign(socket, :mesh, empty_mesh())
+  end
+
+  # One delta onto the ticker. Origins are re-read from the feed: it is one
+  # call, and it is how a pod heard from for the first time gets its colour.
+  defp tick(%{assigns: %{mesh: %{me: %{origin: me}} = mesh}} = socket, entry) do
+    recent = Enum.take([entry | mesh.recent], @ticker_length)
+    origins = Feed.origins()
+
+    assign(socket, :mesh, %{
+      mesh
+      | recent: recent,
+        origins: origins,
+        colors: colors(origins, recent, me)
+    })
+  rescue
+    _ -> socket
+  catch
+    :exit, _ -> socket
+  end
+
+  defp tick(socket, _entry), do: load_mesh(socket)
+
+  defp poll_peers(%{assigns: %{mesh: %{me: %{origin: me}}}} = socket) do
+    if connected?(socket) do
+      start_async(socket, :hive_peers, fn -> {Feed.peers(), Canvas.authorship(me)} end)
+    else
+      socket
+    end
+  end
+
+  defp poll_peers(socket), do: socket
+
+  defp colors(origins, recent, me) do
+    (Enum.map(origins, & &1.origin) ++ Enum.map(recent, & &1.origin))
+    |> Canvas.origin_colors(me)
+  end
+
+  defp feed_up?, do: JidoSwarm.graph_available?() and is_pid(Process.whereis(Feed))
+
+  defp empty_mesh do
+    %{me: nil, origins: [], recent: [], peers: [], authorship: empty_authorship(), colors: %{}}
+  end
+
+  defp empty_authorship do
+    %{nodes: %{}, edges: %{}, total_nodes: 0, total_edges: 0, remote_share: nil}
   end
 
   defp empty_hive do

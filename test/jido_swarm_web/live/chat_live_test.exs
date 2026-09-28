@@ -69,6 +69,25 @@ defmodule JidoSwarmWeb.ChatLiveTest do
       assert eventually(fn -> render(view) =~ "Remote goal #{tag}" end)
     end
 
+    test "the Hive tab says which replica this is and what is on the wire", %{conn: conn} do
+      tag = System.unique_integer([:positive])
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      html = view |> element("button", "Hive") |> render_click()
+      origin = Jido.Context.Graph.origin(JidoSwarm.graph())
+      assert html =~ "You are on"
+      assert html =~ origin
+
+      {:ok, _} = JidoSwarm.Hive.share("tester", %{text: "wire insight #{tag}"})
+
+      # The ticker line: this pod's colour chip, the summary, and "here" for a
+      # local write rather than a lag.
+      assert eventually(fn ->
+               html = render(view)
+               html =~ "+insight &quot;wire insight #{tag}&quot;" and html =~ ~r/>\s*here\s*</
+             end)
+    end
+
     test "the Glider tab reports instrumentation", %{conn: conn} do
       JidoSwarm.GliderMetrics.reset()
       {:ok, view, _html} = live(conn, ~p"/")

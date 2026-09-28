@@ -123,7 +123,7 @@ defmodule JidoSwarm.Hive.FeedTest do
     assert_receive {:hive_delta, _}
 
     :ok = Feed.reset(feed)
-    assert Feed.recent(feed) == []
+    assert Feed.recent(feed, 10) == []
     assert Feed.origins(feed) == []
   end
 

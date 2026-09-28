@@ -26,6 +26,13 @@
         graph {if @graph_available?, do: "up", else: "off"}
       </span>
       <span
+        :if={@mesh.me}
+        class="badge badge-sm badge-ghost font-mono"
+        title="This replica's origin in the mesh; every write it makes carries this stamp"
+      >
+        {@mesh.me.origin}
+      </span>
+      <span
         :if={@glider.totals.calls > 0}
         class="badge badge-sm badge-ghost font-mono"
         title="Glider operations since start"
@@ -190,6 +197,10 @@
           </div>
 
           <div :if={@tab == :hive} id="hive" class="space-y-3 pt-2 text-sm">
+            <%!-- The memory is shared: who wrote it, and what is arriving now. --%>
+            <.replica_strip :if={@mesh.me} mesh={@mesh} />
+            <.delta_ticker :if={@mesh.me} mesh={@mesh} />
+
             <div class="flex flex-wrap gap-1">
               <span
                 :for={status <- ~w(open claimed blocked split done failed)}

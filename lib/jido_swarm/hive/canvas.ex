@@ -13,6 +13,7 @@ defmodule JidoSwarm.Hive.Canvas do
   """
 
   alias Jido.Context.Delta
+  alias JidoSwarm.Hive.Store
 
   # Keys whose repeated writes are the point — presence, leases, counters — so
   # a put is shown as an update rather than an arrival.
@@ -20,6 +21,65 @@ defmodule JidoSwarm.Hive.Canvas do
 
   @max_ops_shown 3
   @caption_length 40
+
+  # One colour per origin, in the order origins are first seen, with this
+  # replica always first. Eight is more pods than a swarm runs; past that the
+  # colours repeat and the legend still names them.
+  @palette ~w(#2563eb #ea580c #16a34a #9333ea #0891b2 #db2777 #ca8a04 #64748b)
+
+  # ===========================================================================
+  # Who wrote the graph
+  # ===========================================================================
+
+  @doc """
+  How much of this replica's graph each origin wrote.
+
+  Counts nodes and edges by the `_origin` stamp `Jido.Context` puts on every
+  entity, and the share of nodes written by someone other than `me` — the one
+  number that says the memory is shared. Two aggregate queries, so cheap enough
+  to run on a slow timer against the whole graph.
+  """
+  @spec authorship(String.t()) :: %{
+          nodes: %{String.t() => non_neg_integer()},
+          edges: %{String.t() => non_neg_integer()},
+          total_nodes: non_neg_integer(),
+          total_edges: non_neg_integer(),
+          remote_share: float() | nil
+        }
+  def authorship(me) do
+    nodes = count_by_origin("MATCH (n:Ctx) RETURN n._origin, count(n)")
+    edges = count_by_origin("MATCH (:Ctx)-[r]->(:Ctx) RETURN r._origin, count(r)")
+    total_nodes = nodes |> Map.values() |> Enum.sum()
+
+    %{
+      nodes: nodes,
+      edges: edges,
+      total_nodes: total_nodes,
+      total_edges: edges |> Map.values() |> Enum.sum(),
+      remote_share: if(total_nodes > 0, do: 1 - Map.get(nodes, me, 0) / total_nodes, else: nil)
+    }
+  end
+
+  defp count_by_origin(cypher) do
+    cypher
+    |> Store.rows([:origin, :count])
+    |> Enum.reject(&is_nil(&1.origin))
+    |> Map.new(fn %{origin: origin, count: count} -> {origin, count} end)
+  end
+
+  @doc """
+  A colour for every origin, this replica's first.
+
+  Colours are assigned by position, so the same list of origins always gets
+  the same colours — the console and the canvas agree because both call this.
+  """
+  @spec origin_colors([String.t()], String.t()) :: %{String.t() => String.t()}
+  def origin_colors(origins, me) do
+    [me | Enum.sort(origins)]
+    |> Enum.uniq()
+    |> Enum.with_index()
+    |> Map.new(fn {origin, i} -> {origin, Enum.at(@palette, rem(i, length(@palette)))} end)
+  end
 
   @doc """
   One line for a delta: what it did, in the Hive's words.

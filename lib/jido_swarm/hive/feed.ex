@@ -116,7 +116,7 @@ defmodule JidoSwarm.Hive.Feed do
 
   @doc "The most recent deltas, newest first."
   @spec recent(GenServer.server(), pos_integer()) :: [entry()]
-  def recent(server \\ __MODULE__, limit \\ 30), do: GenServer.call(server, {:recent, limit})
+  def recent(server \\ __MODULE__, limit), do: GenServer.call(server, {:recent, limit})
 
   @doc """
   What has been heard from each origin, this replica first.
