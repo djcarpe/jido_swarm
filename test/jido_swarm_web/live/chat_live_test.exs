@@ -190,6 +190,26 @@ defmodule JidoSwarmWeb.ChatLiveTest do
       refute render_click(view, "hive_explain_clear", %{}) =~ "is handed"
     end
 
+    test "failures are toasts that explain themselves and can be dismissed", %{conn: conn} do
+      # Without a model every survey fails at once; that is the fixture.
+      System.delete_env("ANTHROPIC_API_KEY")
+      {:ok, _} = JidoSwarm.Swarm.survey("jido")
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert eventually(fn -> has_element?(view, "#failure-toasts [role=alert]") end)
+      html = render(view)
+      assert html =~ "failing"
+      assert html =~ "No model is configured"
+
+      [error] = JidoSwarm.Swarm.Queue.recent_failures() |> Enum.map(& &1.error) |> Enum.take(1)
+      render_click(view, "dismiss_failure", %{"error" => error})
+      refute has_element?(view, "#failure-toasts")
+
+      # Dismissed stays dismissed across refreshes.
+      send(view.pid, :refresh)
+      refute render(view) =~ "failing"
+    end
+
     test "the Glider tab reports instrumentation", %{conn: conn} do
       JidoSwarm.GliderMetrics.reset()
       {:ok, view, _html} = live(conn, ~p"/")
@@ -286,6 +306,29 @@ defmodule JidoSwarmWeb.ChatLiveTest do
       true ->
         Process.sleep(100)
         eventually(fun, tries - 1)
+    end
+  end
+
+  describe "explain_failure/1" do
+    import JidoSwarmWeb.ChatLive, only: [explain_failure: 1]
+
+    test "names the billing problem" do
+      error =
+        ~S({:http, 400, %{"error" => %{"message" => "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.", "type" => "invalid_request_error"}}})
+
+      assert explain_failure(error) =~ "out of credit"
+    end
+
+    test "pulls the API's message out of inspected, escaped output" do
+      error =
+        ~S({:http, 400, %{\"error\" => %{\"message\" => \"Something specific went wrong here\", \"type\" => \"x\"}}})
+
+      assert explain_failure(error) == "Something specific went wrong here"
+
+      plain =
+        ~S({:http, 400, %{"error" => %{"message" => "Another specific message here", "type" => "x"}}})
+
+      assert explain_failure(plain) == "Another specific message here"
     end
   end
 end

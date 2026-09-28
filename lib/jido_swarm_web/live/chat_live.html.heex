@@ -54,12 +54,50 @@
     <span>{active_provider(@status).hint}</span>
   </div>
 
-  <div :for={failure <- @status.failures} class="alert alert-error rounded-none text-sm">
-    <div>
-      <span class="font-semibold">Jobs are failing.</span>
-      <span>{explain_failure(failure.error)}</span>
-      <div class="text-xs opacity-70 mt-1 font-mono">{failure.label}</div>
+  <%!-- Failures as toasts: dismissable one by one or all at once, and they
+       expire on their own once the failing stopped. Styled like the flash
+       toasts above them so they read as the same kind of thing. --%>
+  <div
+    :if={@failure_toasts != []}
+    id="failure-toasts"
+    class="toast toast-top toast-end z-40 mt-16"
+  >
+    <div
+      :for={toast <- @failure_toasts}
+      id={"failure-#{toast.id}"}
+      role="alert"
+      class="alert alert-error w-80 sm:w-96 max-w-80 sm:max-w-96 text-wrap items-start"
+    >
+      <.icon name="hero-exclamation-circle" class="size-5 shrink-0 mt-0.5" />
+      <div class="min-w-0">
+        <p class="font-semibold">
+          {length(toast.labels)} job{if length(toast.labels) == 1, do: "", else: "s"} failing
+        </p>
+        <p class="text-sm">{toast.message}</p>
+        <p
+          class="text-xs opacity-70 mt-1 font-mono truncate"
+          title={Enum.join(toast.labels, ", ")}
+        >
+          {Enum.join(toast.labels, " · ")}
+        </p>
+      </div>
+      <button
+        type="button"
+        class="group self-start cursor-pointer"
+        aria-label="dismiss"
+        phx-click="dismiss_failure"
+        phx-value-error={hd(toast.errors)}
+      >
+        <.icon name="hero-x-mark" class="size-5 opacity-40 group-hover:opacity-70" />
+      </button>
     </div>
+    <button
+      :if={length(@failure_toasts) > 1}
+      class="btn btn-xs btn-ghost self-end"
+      phx-click="dismiss_failures"
+    >
+      dismiss all
+    </button>
   </div>
 
   <div :if={not @status.can_publish?} class="alert alert-info rounded-none text-sm">

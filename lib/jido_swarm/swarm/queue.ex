@@ -33,8 +33,15 @@ defmodule JidoSwarm.Swarm.Queue do
               busy: %{},
               history: [],
               completed: 0,
-              failed: 0
+              failed: 0,
+              # Failure reasons the operator has dismissed; they do not come
+              # back until a job fails for a different reason.
+              dismissed: MapSet.new()
   end
+
+  # A failure stops being "recent" on its own after this long, so a problem
+  # fixed an hour ago is not still announced.
+  @failure_ttl_ms 900_000
 
   # ===========================================================================
   # API
@@ -99,6 +106,13 @@ defmodule JidoSwarm.Swarm.Queue do
   """
   @spec recent_failures(pos_integer()) :: [map()]
   def recent_failures(limit \\ 3), do: GenServer.call(@name, {:recent_failures, limit})
+
+  @doc """
+  Stops announcing these failure reasons. A new failure with the same reason
+  stays dismissed; one with a different reason is announced.
+  """
+  @spec dismiss_failures([String.t()] | :all) :: :ok
+  def dismiss_failures(errors), do: GenServer.call(@name, {:dismiss_failures, errors})
 
   @doc """
   The ids of workers currently idle.
@@ -170,13 +184,26 @@ defmodule JidoSwarm.Swarm.Queue do
   def handle_call(:history, _from, state), do: {:reply, state.history, state}
 
   def handle_call({:recent_failures, limit}, _from, state) do
+    cutoff = System.system_time(:millisecond) - @failure_ttl_ms
+
     failures =
       state.history
       |> Enum.filter(&(&1.status == :failed and &1.error not in [nil, ""]))
+      |> Enum.reject(&MapSet.member?(state.dismissed, &1.error))
+      |> Enum.reject(&(is_integer(&1.finished_at) and &1.finished_at < cutoff))
       |> Enum.uniq_by(& &1.error)
       |> Enum.take(limit)
 
     {:reply, failures, state}
+  end
+
+  def handle_call({:dismiss_failures, :all}, _from, state) do
+    errors = for %{status: :failed, error: e} <- state.history, is_binary(e), do: e
+    {:reply, :ok, %{state | dismissed: MapSet.union(state.dismissed, MapSet.new(errors))}}
+  end
+
+  def handle_call({:dismiss_failures, errors}, _from, state) when is_list(errors) do
+    {:reply, :ok, %{state | dismissed: MapSet.union(state.dismissed, MapSet.new(errors))}}
   end
 
   def handle_call(:idle_worker_ids, _from, state) do
@@ -273,7 +300,8 @@ defmodule JidoSwarm.Swarm.Queue do
       status: job.status,
       worker: job.worker,
       error: job.error && inspect(job.error),
-      duration_ms: duration(job)
+      duration_ms: duration(job),
+      finished_at: Map.get(job, :finished_at)
     }
   end
 

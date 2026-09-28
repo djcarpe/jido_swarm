@@ -311,6 +311,18 @@ defmodule JidoSwarmWeb.ChatLive do
     {:noreply, assign(socket, :expanded?, not socket.assigns.expanded?)}
   end
 
+  # Failure toasts behave like any toast: each one closes, all of them close,
+  # and a dismissed reason stays dismissed until a job fails differently.
+  def handle_event("dismiss_failure", %{"error" => error}, socket) do
+    JidoSwarm.Swarm.Queue.dismiss_failures([error])
+    {:noreply, load(socket)}
+  end
+
+  def handle_event("dismiss_failures", _params, socket) do
+    JidoSwarm.Swarm.Queue.dismiss_failures(:all)
+    {:noreply, load(socket)}
+  end
+
   def handle_event("reset_metrics", _params, socket) do
     JidoSwarm.GliderMetrics.reset()
     {:noreply, socket |> put_flash(:info, "Glider metrics cleared.") |> load()}
@@ -473,6 +485,7 @@ defmodule JidoSwarmWeb.ChatLive do
 
     socket
     |> assign(:status, status)
+    |> assign(:failure_toasts, failure_toasts(status.failures))
     |> assign(:graph_available?, graph_available?)
     |> assign(:summary, if(graph_available?, do: Knowledge.summary(graph), else: empty_summary()))
     |> assign(:findings, if(graph_available?, do: Knowledge.findings(graph), else: []))
@@ -674,6 +687,21 @@ defmodule JidoSwarmWeb.ChatLive do
     end
   end
 
+  # One toast per distinct explanation: three surveys failing on the same
+  # billing error is one thing to tell the operator, with three labels.
+  defp failure_toasts(failures) do
+    failures
+    |> Enum.group_by(&explain_failure(&1.error))
+    |> Enum.map(fn {message, group} ->
+      %{
+        message: message,
+        labels: group |> Enum.map(& &1.label) |> Enum.uniq(),
+        errors: group |> Enum.map(& &1.error) |> Enum.uniq(),
+        id: :erlang.phash2(message)
+      }
+    end)
+  end
+
   defp empty_summary, do: %{repos: 0, findings: 0, proposals: 0, attempts: 0, graph: %{}}
 
   defp now, do: System.system_time(:millisecond)
@@ -745,6 +773,13 @@ defmodule JidoSwarmWeb.ChatLive do
       error =~ "not_configured" or error =~ "No Anthropic API key" ->
         "No model is configured. Set ANTHROPIC_API_KEY in the jido-swarm Secret."
 
+      error =~ "credit balance is too low" ->
+        "The Anthropic account is out of credit. Top up under Plans & Billing; jobs will " <>
+          "resume on their own."
+
+      error =~ "rate_limit" or error =~ "overloaded" ->
+        "The model is rate-limited or overloaded; jobs will retry."
+
       error =~ "authentication_error" or error =~ "invalid x-api-key" ->
         "The Anthropic API key was rejected. Check ANTHROPIC_API_KEY."
 
@@ -758,9 +793,10 @@ defmodule JidoSwarmWeb.ChatLive do
         "Nothing has been learned about that repository yet — run a survey first."
 
       # An API message is usually more accurate than anything guessed here.
+      # The error is `inspect/1` output, so quotes inside it are escaped.
       true ->
-        case Regex.run(~r/"message" => "([^"]{10,300})"/, error) do
-          [_, message] -> message
+        case Regex.run(~r/\\?"message\\?" => \\?"((?:[^"\\]|\\.){10,300}?)\\?"/, error) do
+          [_, message] -> String.replace(message, "\\\"", "\"")
           _ -> String.slice(error, 0, 300)
         end
     end
