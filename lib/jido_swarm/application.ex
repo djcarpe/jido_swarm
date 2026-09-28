@@ -47,7 +47,10 @@ defmodule JidoSwarm.Application do
       |> Application.get_env(:context, [])
       |> Keyword.get(:location, :memory)
       |> then(fn location ->
-        if single_writer?(), do: clear_stale_lock(location)
+        if single_writer?() do
+          clear_stale_lock(location)
+          migrate_legacy_graph(location)
+        end
       end)
 
       [
@@ -91,6 +94,34 @@ defmodule JidoSwarm.Application do
 
         {:error, reason} ->
           Logger.error("swarm: could not remove the stale graph lock #{lock}: #{inspect(reason)}")
+      end
+    end
+
+    :ok
+  end
+
+  # Glider's paged engine cannot open a database written by its earlier
+  # log-format engine, and refuses to — silently rewriting a file another
+  # process might hold would be worse. On a volume this pod alone owns the
+  # refusal is just a crash loop on every boot after an upgrade, so the
+  # conversion happens here, in place, keeping the original beside the new
+  # file. The same single-writer reasoning as the lock above: nobody else can
+  # have it open.
+  defp migrate_legacy_graph(location) do
+    with {:disk, opts} <- location,
+         path when is_binary(path) <- Keyword.get(opts, :path),
+         kind when is_binary(kind) <- Glider.legacy(path) do
+      Logger.warning("swarm: #{path} is a #{kind} glider database; migrating it in place")
+
+      case Glider.migrate(path) do
+        {:ok, %{nodes: nodes, edges: edges}} ->
+          Logger.warning(
+            "swarm: migrated #{nodes} nodes and #{edges} edges; the original is kept as " <>
+              "#{path}.legacy.bak and can be deleted once this pod is healthy"
+          )
+
+        {:error, reason} ->
+          Logger.error("swarm: could not migrate #{path}: #{inspect(reason)}")
       end
     end
 
