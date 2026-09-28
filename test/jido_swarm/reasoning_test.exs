@@ -100,6 +100,45 @@ defmodule JidoSwarm.ReasoningTest do
     end
   end
 
+  describe "an answer cut off at the output cap" do
+    defmodule Truncating do
+      @behaviour JidoSwarm.LLM
+      @impl true
+      def ready?, do: true
+      @impl true
+      def readiness_hint, do: ""
+      @impl true
+      def chat(messages, _opts) do
+        if Enum.any?(messages, &(&1.role == :user and &1.content =~ "cut off")) do
+          {:ok,
+           %{
+             text: ~s({"outcome": "done", "summary": "short"}),
+             tool_calls: [],
+             stop: :end_turn,
+             raw: nil,
+             usage: %{}
+           }}
+        else
+          {:ok,
+           %{
+             text: ~s({"outcome": "done", "summary": "a very long report that goes on and),
+             tool_calls: [],
+             stop: :max_tokens,
+             raw: nil,
+             usage: %{}
+           }}
+        end
+      end
+    end
+
+    test "is asked for again, shorter, instead of being thrown away" do
+      assert {:ok, %{"summary" => "short"}, _} =
+               JidoSwarm.Reasoning.ask_json([%{role: :user, content: "survey"}], :object,
+                 provider: Truncating
+               )
+    end
+  end
+
   describe "ask_json_with_tools/5" do
     # A provider that reads one file, then answers with what it read.
     defmodule ToolProvider do

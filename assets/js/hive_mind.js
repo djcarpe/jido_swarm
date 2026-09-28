@@ -414,13 +414,15 @@ class Renderer {
     g.classList.toggle("hm-highlight", !!this.highlight && this.highlight.has(node.key))
   }
 
+  // `cls` may name several classes; DOMTokenList takes them one at a time.
   pulse(key, cls = "hm-pulse", ms = PULSE_MS) {
     const g = this.nodeEls.get(key)
     if (!g) return
-    g.classList.remove(cls)
+    const classes = cls.split(/\s+/).filter(Boolean)
+    g.classList.remove(...classes)
     void g.getBoundingClientRect()
-    g.classList.add(cls)
-    setTimeout(() => g.classList.remove(cls), ms)
+    g.classList.add(...classes)
+    setTimeout(() => g.classList.remove(...classes), ms)
   }
 
   removeNode(key, fade) {
@@ -651,14 +653,24 @@ export const HiveMind = {
     }
     window.addEventListener("keydown", this.onKey)
 
-    this.handleEvent("hive:snapshot", payload => this.snapshot(payload))
-    this.handleEvent("hive:delta", payload => this.delta(payload))
-    this.handleEvent("hive:patch", payload => this.patch(payload))
-    this.handleEvent("hive:outcome", payload => this.outcome(payload))
-    this.handleEvent("hive:heat", payload => this.heat(payload))
-    this.handleEvent("hive:filter", payload => this.filter(payload))
-    this.handleEvent("hive:highlight", payload => this.highlightKeys(payload))
-    this.handleEvent("hive:select", payload => this.select(payload.key))
+    // A fault in the drawing must never reach LiveView's dispatch: an
+    // exception here would abort the message it came in on, page and all.
+    const guard = (name, fn) =>
+      this.handleEvent(name, payload => {
+        try {
+          fn(payload)
+        } catch (e) {
+          console.error(`hive mind: ${name} failed`, e)
+        }
+      })
+    guard("hive:snapshot", payload => this.snapshot(payload))
+    guard("hive:delta", payload => this.delta(payload))
+    guard("hive:patch", payload => this.patch(payload))
+    guard("hive:outcome", payload => this.outcome(payload))
+    guard("hive:heat", payload => this.heat(payload))
+    guard("hive:filter", payload => this.filter(payload))
+    guard("hive:highlight", payload => this.highlightKeys(payload))
+    guard("hive:select", payload => this.select(payload.key))
 
     this.pushEvent("hive_snapshot", {})
   },

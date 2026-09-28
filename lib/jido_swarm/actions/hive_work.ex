@@ -42,6 +42,9 @@ defmodule JidoSwarm.Actions.HiveWork do
   alias JidoSwarm.Repos
 
   @tool_rounds 16
+  # A survey that read forty files has a lot to say; the cap is generous and
+  # an answer that still overruns is asked for again, shorter.
+  @max_tokens 16_000
 
   @spec run(map(), map()) :: {:ok, map()}
   def run(params, _ctx) do
@@ -62,14 +65,14 @@ defmodule JidoSwarm.Actions.HiveWork do
 
     ask =
       if repos == [] do
-        Reasoning.ask_json(messages, :object, max_tokens: 4_000)
+        Reasoning.ask_json(messages, :object, max_tokens: @max_tokens)
       else
         Reasoning.ask_json_with_tools(
           messages,
           :object,
           Repos.Tools.definitions(),
           &Repos.Tools.call(&1, &2, repos),
-          max_tokens: 4_000,
+          max_tokens: @max_tokens,
           max_rounds: @tool_rounds
         )
       end
@@ -220,7 +223,9 @@ defmodule JidoSwarm.Actions.HiveWork do
     #{Reasoning.clamp(context, 14_000)}
     #{repo_brief(repos)}
 
-    Do the task as far as you can with what you know, then answer with ONE JSON object:
+    Do the task as far as you can with what you know, then answer with ONE JSON object.
+    Keep it compact: cite paths, but keep the summary under 800 characters and each
+    insight under 500; prefer more insights over longer ones.
 
     {
       "outcome": "done" | "decompose" | "handoff" | "fail",

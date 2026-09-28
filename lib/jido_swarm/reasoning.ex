@@ -30,14 +30,48 @@ defmodule JidoSwarm.Reasoning do
           {:ok, term(), LLM.result()} | {:error, term()}
   def ask_json(messages, expect, opts \\ []) do
     case LLM.chat(messages, opts) do
-      {:ok, result} ->
-        case extract_json(result.text, expect) do
-          {:ok, value} -> {:ok, value, result}
-          :error -> {:error, {:unparseable, result.text}}
+      {:ok, result} -> finish(messages, result, expect, opts)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # The answer, parsed — or, when the model ran into the output cap
+  # mid-JSON, one more turn asking for the same answer in fewer words. A
+  # survey that read forty files and lost its report to a closing brace is
+  # the worst outcome there is; a shorter report is a fine one.
+  defp finish(messages, result, expect, opts) do
+    case extract_json(result.text || "", expect) do
+      {:ok, value} ->
+        {:ok, value, result}
+
+      :error when result.stop == :max_tokens ->
+        retry =
+          messages ++
+            [
+              LLM.assistant_message(result),
+              %{
+                role: :user,
+                content:
+                  "Your answer was cut off at the output limit before the JSON closed. Give the " <>
+                    "same answer again, complete and shorter: summary under 600 characters, each " <>
+                    "text under 400 characters, at most ten items per list. Reply with the JSON " <>
+                    "object only."
+              }
+            ]
+
+        case LLM.chat(retry, Keyword.delete(opts, :tools)) do
+          {:ok, again} ->
+            case extract_json(again.text || "", expect) do
+              {:ok, value} -> {:ok, value, again}
+              :error -> {:error, {:unparseable, again.text}}
+            end
+
+          {:error, reason} ->
+            {:error, reason}
         end
 
-      {:error, reason} ->
-        {:error, reason}
+      :error ->
+        {:error, {:unparseable, result.text}}
     end
   end
 
@@ -92,10 +126,7 @@ defmodule JidoSwarm.Reasoning do
         loop_tools(next, expect, tools, executor, opts, rounds_left - 1)
 
       {:ok, result} ->
-        case extract_json(result.text || "", expect) do
-          {:ok, value} -> {:ok, value, result}
-          :error -> {:error, {:unparseable, result.text}}
-        end
+        finish(messages, result, expect, opts)
 
       {:error, reason} ->
         {:error, reason}
