@@ -2,9 +2,10 @@ defmodule Jido.Context.Cypher do
   @moduledoc """
   Builds Cypher fragments for the Glider engine.
 
-  Glider's query language has no bound parameters — a query is a string, and
-  every value in it is a literal. That makes correct encoding a safety
-  requirement rather than a convenience, so this module is the only place in
+  `Jido.Context` sends Glider complete statements with every value written as a
+  literal (Glider also accepts `$name` parameters through `glider_ex`, which the
+  engine does not use yet). That makes correct encoding a safety requirement
+  rather than a convenience, so this module is the only place in
   `Jido.Context` that turns Elixir terms into query text.
 
   Two rules do the work:

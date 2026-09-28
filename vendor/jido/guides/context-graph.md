@@ -135,10 +135,12 @@ persistence story.
 | | |
 |---|---|
 | `:memory` *(default)* | nothing touches disk; the graph dies with the process |
-| `{:disk, path: "g.gldb"}` | Glider opens a file that is its write-ahead log and its persistent form at once |
+| `{:disk, path: "g.gldb"}` | Glider opens a paged database file, with its write-ahead log beside it |
 
-A disk-backed graph survives a restart on its own. Reads still never touch disk
-— Glider holds the graph in memory and the file is the log.
+A disk-backed graph survives a restart on its own, and can grow past RAM:
+Glider keeps its pages on disk and the hot ones in a page cache, so memory
+stays near the cache size (1 GiB by default) however large the graph gets.
+An in-memory graph is bounded by RAM instead.
 
 **`:store` — where snapshots go.**
 
@@ -303,10 +305,11 @@ else, so a query written against your own labels never encounters one.
 
 ### Injection
 
-Glider has no bound parameters — a query is a string, and every value in it is
-a literal — so `Jido.Context.Cypher` is the only place that turns Elixir terms
-into query text, and it draws a hard line: **values are escaped, identifiers
-are validated**. Labels, relationship types and property keys appear outside
+`Jido.Context` sends Glider complete statements, with every value written as a
+literal. (Glider itself accepts `$name` parameters through `glider_ex`; the
+engine does not use them yet.) So `Jido.Context.Cypher` is the only place that
+turns Elixir terms into query text, and it draws a hard line: **values are
+escaped, identifiers are validated**. Labels, relationship types and property keys appear outside
 quotes, where no escape would make an arbitrary binary safe, so they must match
 `[A-Za-z_][A-Za-z0-9_]*` and are rejected otherwise — including when they
 arrive inside a delta from a peer. Entity keys and property values are values,
@@ -332,9 +335,11 @@ S3 bucket.
 - **One writer per graph file.** Glider takes a file lock; a second open of the
   same path fails until the first closes. The graph process traps exits so the
   handle and lock are released when its agent stops.
-- **The graph must fit in RAM.** Glider is memory-resident by design — that is
-  what makes whole-graph algorithms fast. For knowledge- and context-graph
-  sizes this is the right trade; for a billion edges it is not.
+- **Memory follows the location.** An in-memory graph must fit in RAM. A
+  disk-backed graph pages: its memory stays near the page cache however large
+  the graph grows, and whole-graph algorithms spill working state to disk past
+  their memory budget, so they keep running on graphs larger than RAM, more
+  slowly.
 - **`:pg` alone is not durable.** A delta published while a peer is down is
   never seen by that peer. Add the log transport when agents must converge on
   knowledge produced before they started.

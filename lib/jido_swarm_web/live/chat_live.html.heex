@@ -13,6 +13,9 @@
       <span :if={@status.queue.busy > 0} class="badge badge-sm badge-info">
         {@status.queue.busy} running
       </span>
+      <span :if={Map.get(@hive.counts, "open", 0) > 0} class="badge badge-sm badge-accent">
+        {Map.get(@hive.counts, "open", 0)} open on the board
+      </span>
     </div>
 
     <div class="flex-none gap-2 items-center">
@@ -127,8 +130,10 @@
           <h2 class="card-title text-sm">Pool</h2>
           <div class="text-xs opacity-70">
             {@status.autoscaler.min_workers}–{@status.autoscaler.max_workers} workers,
-            +{@status.autoscaler.scale_step} per scale-out, retire after
-            {div(@status.autoscaler.idle_ttl, 1000)}s idle
+            +{@status.autoscaler.scale_step} per scale-out, retire after {div(
+              @status.autoscaler.idle_ttl,
+              1000
+            )}s idle
           </div>
           <div class="flex flex-wrap gap-1">
             <span :for={worker <- @status.workers} class="badge badge-sm badge-outline font-mono">
@@ -165,7 +170,16 @@
         <div class="card-body p-4 gap-2">
           <div role="tablist" class="tabs tabs-bordered">
             <button
-              :for={{tab, label} <- [findings: "Findings", proposals: "Proposals", attempts: "Attempts", activity: "Activity", glider: "Glider"]}
+              :for={
+                {tab, label} <- [
+                  hive: "Hive",
+                  findings: "Findings",
+                  proposals: "Proposals",
+                  attempts: "Attempts",
+                  activity: "Activity",
+                  glider: "Glider"
+                ]
+              }
               role="tab"
               class={["tab", @tab == tab && "tab-active"]}
               phx-click="tab"
@@ -175,11 +189,139 @@
             </button>
           </div>
 
+          <div :if={@tab == :hive} id="hive" class="space-y-3 pt-2 text-sm">
+            <div class="flex flex-wrap gap-1">
+              <span
+                :for={status <- ~w(open claimed blocked split done failed)}
+                :if={Map.get(@hive.counts, status, 0) > 0}
+                class={["badge badge-sm", hive_badge(status)]}
+              >
+                {Map.get(@hive.counts, status)} {status}
+              </span>
+              <span :if={@hive.counts == %{}} class="text-xs opacity-60">
+                The board is empty. Add a goal below, or connect an agent over MCP.
+              </span>
+            </div>
+
+            <div :if={@hive.goals != []} class="space-y-1">
+              <div class="text-xs opacity-60">Goals</div>
+              <div :for={goal <- @hive.goals} class="space-y-0.5">
+                <div class="flex justify-between gap-2">
+                  <span class="truncate">
+                    <span class="badge badge-xs badge-outline mr-1">P{goal.priority}</span>
+                    {goal.title}
+                  </span>
+                  <span class="text-xs opacity-60 shrink-0">{goal.done}/{goal.tasks}</span>
+                </div>
+                <progress
+                  class="progress progress-success w-full h-1"
+                  value={progress(goal)}
+                  max="100"
+                ></progress>
+              </div>
+            </div>
+
+            <div :if={@hive.in_flight != []} class="space-y-1">
+              <div class="text-xs opacity-60">In flight</div>
+              <div :for={t <- @hive.in_flight} class="flex justify-between gap-2 text-xs">
+                <span class="truncate">{t.title}</span>
+                <span class="shrink-0 font-mono opacity-70">{t.agent} · {lease_left(t.lease_until)}</span>
+              </div>
+            </div>
+
+            <div :if={@hive.open != []} class="space-y-1">
+              <div class="text-xs opacity-60">Open, best first</div>
+              <div :for={t <- @hive.open} class="flex justify-between gap-2 text-xs">
+                <span class="truncate">
+                  <span class="badge badge-xs badge-outline mr-1">P{t.priority}</span>{t.title}
+                </span>
+                <span :if={t.skills != []} class="shrink-0 opacity-60">{Enum.join(t.skills, ", ")}</span>
+              </div>
+            </div>
+
+            <div :if={@hive.open_questions != []} class="space-y-1">
+              <div class="text-xs opacity-60">Open questions</div>
+              <div :for={q <- @hive.open_questions} class="text-xs border-l-2 border-warning pl-2">
+                {q.text}
+                <span class="opacity-60">— {q.agent}</span>
+              </div>
+            </div>
+
+            <div :if={@hive.recent_insights != []} class="space-y-1">
+              <div class="text-xs opacity-60">What the swarm learned</div>
+              <div
+                :for={i <- @hive.recent_insights}
+                class="text-xs border-l-2 border-base-300 pl-2"
+              >
+                <span class="badge badge-xs badge-outline mr-1">{i.kind}</span>
+                {i.text}
+                <span class="opacity-60">
+                  — {i.agent}, conf {i.confidence}{if i.consensus != 0,
+                    do: ", #{i.consensus} votes"}
+                </span>
+              </div>
+            </div>
+
+            <div :if={@hive.agents != []} class="space-y-1">
+              <div class="text-xs opacity-60">Agents on the board</div>
+              <div class="flex flex-wrap gap-1">
+                <span
+                  :for={a <- @hive.agents}
+                  class="badge badge-sm badge-outline"
+                  title={Enum.join(a.skills, ", ")}
+                >
+                  {a.name} <span class="opacity-60 ml-1">{a.kind} · {a.status}</span>
+                </span>
+              </div>
+            </div>
+
+            <form id="hive-goal" phx-submit="hive_add_goal" class="flex gap-1">
+              <input
+                type="text"
+                name="title"
+                placeholder="New goal…"
+                class="input input-bordered input-xs flex-1"
+              />
+              <select name="priority" class="select select-bordered select-xs">
+                <option :for={p <- 5..1//-1} value={p} selected={p == 3}>P{p}</option>
+              </select>
+              <button type="submit" class="btn btn-xs">add goal</button>
+            </form>
+
+            <form id="hive-task" phx-submit="hive_add_task" class="flex flex-wrap gap-1">
+              <input
+                type="text"
+                name="title"
+                placeholder="New task…"
+                class="input input-bordered input-xs flex-1 min-w-40"
+              />
+              <input
+                type="text"
+                name="skills"
+                placeholder="skills, comma separated"
+                class="input input-bordered input-xs w-40"
+              />
+              <select name="goal" class="select select-bordered select-xs max-w-40">
+                <option value="">no goal</option>
+                <option :for={g <- @hive.goals} value={g.key}>{g.title}</option>
+              </select>
+              <button type="submit" class="btn btn-xs">add task</button>
+            </form>
+
+            <div class="text-xs opacity-60">
+              Agents join from anywhere over MCP:
+              <code class="font-mono block mt-1 select-all">claude mcp add --transport http hive {mcp_url()}</code>
+            </div>
+          </div>
+
           <div :if={@tab == :findings} class="space-y-2 pt-2">
             <p :if={@findings == []} class="text-xs opacity-60">
               Nothing learned yet. Run a survey.
             </p>
-            <div :for={finding <- Enum.take(@findings, 25)} class="text-sm border-l-2 border-base-300 pl-2">
+            <div
+              :for={finding <- Enum.take(@findings, 25)}
+              class="text-sm border-l-2 border-base-300 pl-2"
+            >
               <span class="badge badge-xs badge-outline mr-1">{finding.kind}</span>
               {finding.summary}
             </div>
@@ -189,7 +331,10 @@
             <p :if={@proposals == []} class="text-xs opacity-60">
               No proposals yet. Survey a repository first, then press propose.
             </p>
-            <div :for={proposal <- Enum.take(@proposals, 25)} class="text-sm border-l-2 border-base-300 pl-2">
+            <div
+              :for={proposal <- Enum.take(@proposals, 25)}
+              class="text-sm border-l-2 border-base-300 pl-2"
+            >
               <div class="flex items-start justify-between gap-2">
                 <div>
                   <span class={["badge badge-xs mr-1", proposal_tone(proposal.status)]}>
@@ -215,7 +360,10 @@
             <p :if={@attempts == []} class="text-xs opacity-60">
               No implementation attempts yet.
             </p>
-            <div :for={attempt <- Enum.take(@attempts, 25)} class="text-sm border-l-2 border-base-300 pl-2">
+            <div
+              :for={attempt <- Enum.take(@attempts, 25)}
+              class="text-sm border-l-2 border-base-300 pl-2"
+            >
               <span class={["badge badge-xs mr-1", attempt_tone(attempt.status)]}>
                 {attempt.status}
               </span>
@@ -230,7 +378,10 @@
               >
                 pull request
               </a>
-              <p :if={attempt.note not in [nil, ""]} class="text-xs opacity-60 mt-1 font-mono whitespace-pre-wrap">
+              <p
+                :if={attempt.note not in [nil, ""]}
+                class="text-xs opacity-60 mt-1 font-mono whitespace-pre-wrap"
+              >
                 {String.slice(attempt.note, 0, 400)}
               </p>
             </div>

@@ -72,7 +72,10 @@ defmodule JidoSwarmWeb.ChatLive do
 
     {:noreply,
      socket
-     |> put_flash(:info, "Queued #{count} jobs across #{length(JidoSwarm.Repos.all())} repositories.")
+     |> put_flash(
+       :info,
+       "Queued #{count} jobs across #{length(JidoSwarm.Repos.all())} repositories."
+     )
      |> load()}
   end
 
@@ -97,6 +100,47 @@ defmodule JidoSwarmWeb.ChatLive do
 
   def handle_event("tab", %{"tab" => tab}, socket) do
     {:noreply, assign(socket, :tab, String.to_existing_atom(tab))}
+  end
+
+  # The operator steers the Hive the same way any agent does: by adding work to
+  # the board. Nothing is assigned; agents pick it up by themselves.
+  def handle_event("hive_add_goal", %{"title" => title} = params, socket) do
+    case String.trim(title) do
+      "" ->
+        {:noreply, put_flash(socket, :error, "A goal needs a title.")}
+
+      title ->
+        {:ok, _} =
+          JidoSwarm.Hive.add_goal(%{
+            title: title,
+            description: String.trim(params["description"] || ""),
+            priority: params["priority"] || "3",
+            created_by: "operator"
+          })
+
+        {:noreply, socket |> put_flash(:info, "Goal added to the board.") |> load()}
+    end
+  end
+
+  def handle_event("hive_add_task", %{"title" => title} = params, socket) do
+    case String.trim(title) do
+      "" ->
+        {:noreply, put_flash(socket, :error, "A task needs a title.")}
+
+      title ->
+        {:ok, _} =
+          JidoSwarm.Hive.add_task(%{
+            title: title,
+            detail: String.trim(params["detail"] || ""),
+            goal: blank_to_nil(params["goal"]),
+            skills: params["skills"] || "",
+            priority: params["priority"] || "3",
+            created_by: "operator"
+          })
+
+        {:noreply,
+         socket |> put_flash(:info, "Task added. An idle agent will pick it up.") |> load()}
+    end
   end
 
   def handle_event("reset_metrics", _params, socket) do
@@ -162,8 +206,35 @@ defmodule JidoSwarmWeb.ChatLive do
     |> assign(:attempts, if(graph_available?, do: Knowledge.attempts(graph), else: []))
     |> assign(:repos, JidoSwarm.Repos.all())
     |> assign(:glider, JidoSwarm.GliderMetrics.snapshot())
+    |> assign(:hive, if(graph_available?, do: hive_digest(), else: empty_hive()))
     |> assign_turns(graph_available?, graph)
   end
+
+  # The board is read like the rest of the graph: on the refresh timer, because
+  # other pods and MCP agents change it without this process being involved.
+  defp hive_digest do
+    JidoSwarm.Hive.digest(limit: 12)
+  rescue
+    _ -> empty_hive()
+  catch
+    :exit, _ -> empty_hive()
+  end
+
+  defp empty_hive do
+    %{
+      goals: [],
+      counts: %{},
+      in_flight: [],
+      open: [],
+      blocked: [],
+      open_questions: [],
+      recent_insights: [],
+      agents: []
+    }
+  end
+
+  defp blank_to_nil(v) when v in [nil, ""], do: nil
+  defp blank_to_nil(v), do: v
 
   # The graph is the conversation's home, so every browser sees the same
   # history. Before it exists, turns are kept in the socket alone.
@@ -333,6 +404,35 @@ defmodule JidoSwarmWeb.ChatLive do
   def error_tone(rate) when rate >= 10, do: "text-error font-semibold"
   def error_tone(rate) when rate > 0, do: "text-warning"
   def error_tone(_), do: "opacity-60"
+
+  @doc "Percent of a goal's tasks that are done."
+  @spec progress(map()) :: non_neg_integer()
+  def progress(%{tasks: 0}), do: 0
+  def progress(%{tasks: t, done: d}), do: round(d * 100 / t)
+
+  @doc "Time left on a lease, for the in-flight list."
+  @spec lease_left(integer() | nil) :: String.t()
+  def lease_left(nil), do: ""
+
+  def lease_left(until) do
+    case div(until - now(), 1000) do
+      s when s <= 0 -> "expiring"
+      s when s < 60 -> "#{s}s left"
+      s -> "#{div(s, 60)}m left"
+    end
+  end
+
+  @doc "A board status as a badge tone."
+  @spec hive_badge(String.t()) :: String.t()
+  def hive_badge("open"), do: "badge-info"
+  def hive_badge("claimed"), do: "badge-warning"
+  def hive_badge("done"), do: "badge-success"
+  def hive_badge("failed"), do: "badge-error"
+  def hive_badge(_), do: "badge-ghost"
+
+  @doc "How to connect an MCP client to this node."
+  @spec mcp_url() :: String.t()
+  def mcp_url, do: JidoSwarmWeb.Endpoint.url() <> "/mcp"
 
   @doc false
   def format_duration(nil), do: ""

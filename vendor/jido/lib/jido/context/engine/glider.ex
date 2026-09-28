@@ -3,9 +3,10 @@ defmodule Jido.Context.Engine.Glider do
   `Jido.Context.Engine` backed by [Glider](https://github.com/agentjido/glider).
 
   Glider is an embedded property graph in the shape SQLite took for relational
-  data: one file, no server, linked into the BEAM as a NIF. The graph is
-  memory-resident and the file is its write-ahead log, so reads never touch
-  disk and writes append.
+  data: one file, no server, linked into the BEAM as a NIF. A file-backed graph
+  is a paged database with a write-ahead log beside it: memory stays near the
+  page cache however large the graph grows. `:memory` graphs are bounded by
+  RAM.
 
   ## Installation
 
@@ -20,8 +21,8 @@ defmodule Jido.Context.Engine.Glider do
   ## Serialisation
 
   Calls against one Glider handle are serialised by a mutex inside the NIF —
-  Glider mutates an in-memory graph in place, so concurrent access would be a
-  data race. `Jido.Context.Graph` owns one handle per graph and is the only
+  a graph owns its page cache and write state and mutates them in place, so
+  concurrent access would be a data race. `Jido.Context.Graph` owns one handle per graph and is the only
   caller, which satisfies that without contending on the mutex.
 
   Long-running calls (queries, algorithms, import, export, compaction) run on

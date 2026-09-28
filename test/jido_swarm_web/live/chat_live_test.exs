@@ -32,6 +32,31 @@ defmodule JidoSwarmWeb.ChatLiveTest do
       assert view |> element("button", "Attempts") |> render_click() =~ "No implementation"
     end
 
+    test "the Hive tab shows the board and lets the operator add work", %{conn: conn} do
+      tag = System.unique_integer([:positive])
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      html = view |> element("button", "Hive") |> render_click()
+      assert html =~ "claude mcp add --transport http hive"
+
+      view |> form("#hive-goal", %{title: "UI goal #{tag}", priority: "4"}) |> render_submit()
+      [goal] = Enum.filter(JidoSwarm.Hive.goals(), &(&1.title == "UI goal #{tag}"))
+      assert goal.priority == 4
+
+      html =
+        view
+        |> form("#hive-task", %{title: "UI task #{tag}", skills: "Elixir, UI", goal: goal.key})
+        |> render_submit()
+
+      assert html =~ "UI goal #{tag}"
+      assert html =~ "UI task #{tag}"
+      assert html =~ "open on the board"
+
+      [task] = Enum.filter(JidoSwarm.Hive.tasks(), &(&1.title == "UI task #{tag}"))
+      assert task.goal == goal.key and task.skills == ["elixir", "ui"]
+      assert task.created_by == "operator"
+    end
+
     test "the Glider tab reports instrumentation", %{conn: conn} do
       JidoSwarm.GliderMetrics.reset()
       {:ok, view, _html} = live(conn, ~p"/")
@@ -93,7 +118,9 @@ defmodule JidoSwarmWeb.ChatLiveTest do
     test "queueing a survey reports back", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/")
 
-      html = view |> element("button[phx-value-repo='jido'][phx-click='survey']") |> render_click()
+      html =
+        view |> element("button[phx-value-repo='jido'][phx-click='survey']") |> render_click()
+
       assert html =~ "Queued a survey of jido"
     end
 
