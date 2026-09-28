@@ -135,16 +135,22 @@ defmodule JidoSwarm.LLM do
           %{module: module(), name: String.t(), ready?: boolean(), hint: String.t()}
         ]
   def providers do
-    for mod <- [JidoSwarm.LLM.Ollama, JidoSwarm.LLM.Anthropic] do
+    for mod <- provider_modules() do
       %{
         module: mod,
         name: mod |> Module.split() |> List.last(),
-        ready?: mod.ready?(),
+        # From the last background probe, never a round trip: this is read on
+        # every console mount (see `JidoSwarm.LLM.Health`).
+        ready?: JidoSwarm.LLM.Health.ready?(mod),
         hint: mod.readiness_hint(),
         active?: mod == provider()
       }
     end
   end
+
+  @doc "Every provider module, in the order the console lists them."
+  @spec provider_modules() :: [module()]
+  def provider_modules, do: [JidoSwarm.LLM.Ollama, JidoSwarm.LLM.Anthropic]
 
   @doc """
   Builds a normalized assistant message from a result, ready to append to the

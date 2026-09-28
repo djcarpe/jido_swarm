@@ -14,6 +14,9 @@ defmodule JidoSwarm.Application do
         JidoSwarmWeb.Telemetry,
         {DNSCluster, query: Application.get_env(:jido_swarm, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: JidoSwarm.PubSub},
+        # Probes the model providers in the background so nothing on the
+        # request path ever waits on a network timeout.
+        JidoSwarm.LLM.Health,
         # Before the graph, so no operation goes unmeasured — including the
         # graph's own startup, which is the slowest one there is.
         JidoSwarm.GliderMetrics

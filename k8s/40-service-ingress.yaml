@@ -5,6 +5,14 @@ metadata:
   namespace: jido-swarm
   labels:
     app.kubernetes.io/name: jido-swarm
+  annotations:
+    # A browser session must keep talking to the same replica. A websocket
+    # is one connection and does that by itself, but LiveView falls back to
+    # long polling when the socket is slow to join, and every poll is a new
+    # request — without a sticky cookie two replicas take turns and the
+    # session is never found, which reads as a page that cannot stay up.
+    traefik.ingress.kubernetes.io/service.sticky.cookie: "true"
+    traefik.ingress.kubernetes.io/service.sticky.cookie.name: jido_swarm_replica
 spec:
   type: ClusterIP
   selector:
