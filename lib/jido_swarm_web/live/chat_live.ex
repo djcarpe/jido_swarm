@@ -300,6 +300,40 @@ defmodule JidoSwarmWeb.ChatLive do
     {:noreply, socket |> assign(:hive_refresh_pending?, false) |> load_hive()}
   end
 
+  # Part of a delta lost to a higher stamp. The canvas drew it as it arrived;
+  # flag it, then send what the graph actually kept for those keys.
+  def handle_info({:hive_outcome, outcome}, socket) do
+    keys = outcome.superseded ++ outcome.tombstoned
+    node_keys = Enum.reject(keys, &String.contains?(&1, "|"))
+    mesh = socket.assigns.mesh
+
+    recent =
+      Enum.map(mesh.recent, fn
+        %{id: id} = e when id == outcome.id ->
+          Map.put(e, :outcome, %{
+            superseded: length(outcome.superseded),
+            tombstoned: length(outcome.tombstoned)
+          })
+
+        e ->
+          e
+      end)
+
+    origins = canvas(fn -> Feed.origins() end) || mesh.origins
+
+    {:noreply,
+     socket
+     |> assign(:mesh, %{mesh | recent: recent, origins: origins})
+     |> push_event("hive:outcome", %{
+       superseded: outcome.superseded,
+       tombstoned: outcome.tombstoned
+     })
+     |> push_event("hive:patch", %{
+       nodes: canvas(fn -> Canvas.nodes(node_keys) end) || [],
+       edges: []
+     })}
+  end
+
   def handle_info({:hive_probe, _probe}, socket) do
     {:noreply, assign(socket, :probes, canvas(fn -> Feed.probes() end) || [])}
   end

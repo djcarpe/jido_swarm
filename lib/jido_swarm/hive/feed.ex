@@ -38,6 +38,15 @@ defmodule JidoSwarm.Hive.Feed do
   why. It is the convergence rule made visible, not a race that could go
   either way.
 
+  ## What the rule decided
+
+  A delta arriving here is not the same as a delta applied: `Jido.Context`
+  keeps whichever write of an entity carries the higher stamp and drops the
+  other whole. The graph reports that as telemetry, and this feed listens —
+  when a delta loses, in part or in full, the entry on the ticker is marked
+  and `{:hive_outcome, ...}` names the keys, so the console can show the
+  losing write and re-read what actually survived.
+
   ## Why one subscriber and no graph reads
 
   The router sends every matching delta to every subscriber, so ten LiveViews
@@ -124,6 +133,21 @@ defmodule JidoSwarm.Hive.Feed do
     :ok = Mesh.subscribe(mesh, Keyword.get(opts, :topics, @default_topics))
     Process.send_after(self(), :sweep, @sweep_every_ms)
 
+    # The graph and the router run these in their own processes; only what
+    # this feed needs to hear about becomes a message.
+    handler = "hive-feed-#{inspect(Keyword.get(opts, :name, __MODULE__))}"
+    :telemetry.detach(handler)
+
+    :ok =
+      :telemetry.attach_many(
+        handler,
+        [[:jido, :context, :delta, :applied], [:jido, :context, :mesh, :duplicate]],
+        &__MODULE__.handle_telemetry/4,
+        %{feed: self(), graph: graph, mesh: mesh}
+      )
+
+    Process.flag(:trap_exit, true)
+
     {:ok,
      %{
        name: Keyword.get(opts, :name, __MODULE__),
@@ -137,9 +161,37 @@ defmodule JidoSwarm.Hive.Feed do
        ring: [],
        origins: %{},
        burst: {0, 0},
-       probes: %{}
+       probes: %{},
+       handler: handler
      }}
   end
+
+  @impl true
+  def terminate(_reason, state), do: :telemetry.detach(state.handler)
+
+  @doc false
+  # Runs inside the graph or the router. Cheap by construction: a map lookup
+  # and, only when a write lost, one message.
+  def handle_telemetry([:jido, :context, :delta, :applied], m, %{graph: graph} = meta, %{
+        feed: feed,
+        graph: graph
+      }) do
+    if m.superseded + m.tombstoned > 0 do
+      send(feed, {:delta_outcome, meta.id, meta.origin, meta.outcomes})
+    end
+
+    :ok
+  end
+
+  def handle_telemetry([:jido, :context, :mesh, :duplicate], _m, %{mesh: mesh} = meta, %{
+        feed: feed,
+        mesh: mesh
+      }) do
+    send(feed, {:duplicate, meta.origin})
+    :ok
+  end
+
+  def handle_telemetry(_event, _m, _meta, _config), do: :ok
 
   # ===========================================================================
   # Reading
@@ -385,6 +437,39 @@ defmodule JidoSwarm.Hive.Feed do
     end
   end
 
+  # The graph applied a delta and some of it lost. The ring entry is marked,
+  # the origin's tally grows, and the console is told which keys to re-read.
+  def handle_info({:delta_outcome, id, origin, outcomes}, state) do
+    lost = fn wanted, keys -> for {key, ^wanted} <- Enum.zip(keys, outcomes), do: key end
+
+    {ring, keys} =
+      Enum.map_reduce(state.ring, [], fn
+        %{id: ^id} = entry, _ -> {%{entry | outcome: Enum.frequencies(outcomes)}, entry.keys}
+        entry, acc -> {entry, acc}
+      end)
+
+    superseded = lost.(:superseded, keys)
+    tombstoned = lost.(:tombstoned, keys)
+
+    stats =
+      state.origins
+      |> Map.get(origin, new_stats())
+      |> Map.update!(:superseded, &(&1 + length(superseded)))
+      |> Map.update!(:tombstoned, &(&1 + length(tombstoned)))
+
+    broadcast(
+      state,
+      {:hive_outcome, %{id: id, origin: origin, superseded: superseded, tombstoned: tombstoned}}
+    )
+
+    {:noreply, %{state | ring: ring, origins: Map.put(state.origins, origin, stats)}}
+  end
+
+  def handle_info({:duplicate, origin}, state) do
+    stats = state.origins |> Map.get(origin, new_stats()) |> Map.update!(:duplicates, &(&1 + 1))
+    {:noreply, %{state | origins: Map.put(state.origins, origin, stats)}}
+  end
+
   def handle_info(:sweep, state) do
     Process.send_after(self(), :sweep, @sweep_every_ms)
     sweep(state)
@@ -531,9 +616,16 @@ defmodule JidoSwarm.Hive.Feed do
       lag_ms: if(local, do: nil, else: max(now - delta.ts, 0)),
       ops: length(delta.ops),
       summary: Canvas.summarize(delta),
-      kinds: kinds(delta)
+      kinds: kinds(delta),
+      keys: Enum.map(delta.ops, &op_key/1),
+      outcome: nil
     }
   end
+
+  defp op_key({:put_node, key, _, _}), do: key
+  defp op_key({:drop_node, key}), do: key
+  defp op_key({:put_edge, from, type, to, _}), do: "#{from}|#{type}|#{to}"
+  defp op_key({:drop_edge, from, type, to}), do: "#{from}|#{type}|#{to}"
 
   defp kinds(%Delta{ops: ops}) do
     ops
@@ -577,6 +669,9 @@ defmodule JidoSwarm.Hive.Feed do
       ops: 0,
       nodes: 0,
       edges: 0,
+      superseded: 0,
+      tombstoned: 0,
+      duplicates: 0,
       last_seq: 0,
       last_ts: nil,
       last_seen_at: nil,
@@ -595,6 +690,9 @@ defmodule JidoSwarm.Hive.Feed do
       ops: stats.ops,
       nodes: stats.nodes,
       edges: stats.edges,
+      superseded: stats.superseded,
+      tombstoned: stats.tombstoned,
+      duplicates: stats.duplicates,
       last_seq: stats.last_seq,
       last_ts: stats.last_ts,
       age_ms: stats.last_seen_at && now - stats.last_seen_at,

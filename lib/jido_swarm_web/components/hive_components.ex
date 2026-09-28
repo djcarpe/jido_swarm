@@ -56,6 +56,9 @@ defmodule JidoSwarmWeb.HiveComponents do
           <span class="opacity-70">
             {o.deltas}Δ · seq {o.last_seq}{if o.lag_p50_ms, do: " · ~#{o.lag_p50_ms}ms"}
           </span>
+          <span :if={Map.get(o, :superseded, 0) + Map.get(o, :tombstoned, 0) > 0} class="text-error">
+            {Map.get(o, :superseded, 0) + Map.get(o, :tombstoned, 0)} lost
+          </span>
         </span>
         <span :if={@mesh.origins == []} class="text-xs opacity-60">
           No deltas yet. The first write, from any pod, appears here.
@@ -234,6 +237,13 @@ defmodule JidoSwarmWeb.HiveComponents do
         ></span>
         <span class="shrink-0" style={"color: #{color(@mesh, e.origin)}"}>{e.origin}</span>
         <span class="truncate flex-1">{e.summary}</span>
+        <span
+          :if={lost(e) > 0}
+          class="badge badge-xs badge-error badge-outline shrink-0"
+          title="Lost to a write with a higher stamp; every replica kept the other one"
+        >
+          {lost(e)} lost
+        </span>
         <span class="shrink-0 opacity-60">
           {if e.local, do: "here", else: "#{e.lag_ms}ms"}
         </span>
@@ -381,6 +391,9 @@ defmodule JidoSwarmWeb.HiveComponents do
 
   defp color(mesh, origin), do: Map.get(mesh.colors, origin, "#64748b")
 
+  defp lost(%{outcome: %{superseded: s, tombstoned: t}}), do: s + t
+  defp lost(_), do: 0
+
   defp percent(share), do: "#{round(share * 100)}%"
 
   defp cell(seen, origin) when is_map(seen), do: Map.get(seen, origin, "—")
@@ -392,9 +405,12 @@ defmodule JidoSwarmWeb.HiveComponents do
       "#{o.nodes} nodes, #{o.edges} edges",
       "highest seq #{o.last_seq}",
       o.age_ms && "last heard #{div(o.age_ms, 1000)}s ago",
-      o.lag_p50_ms && "lag p50 #{o.lag_p50_ms}ms, max #{o.lag_max_ms}ms (pod clocks)"
+      o.lag_p50_ms && "lag p50 #{o.lag_p50_ms}ms, max #{o.lag_max_ms}ms (pod clocks)",
+      Map.get(o, :superseded, 0) > 0 && "#{o.superseded} writes lost to a higher stamp",
+      Map.get(o, :tombstoned, 0) > 0 && "#{o.tombstoned} writes lost to a deletion",
+      Map.get(o, :duplicates, 0) > 0 && "#{o.duplicates} duplicate deliveries dropped"
     ]
-    |> Enum.reject(&is_nil/1)
+    |> Enum.reject(&(&1 in [nil, false]))
     |> Enum.join(" · ")
   end
 end

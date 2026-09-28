@@ -204,6 +204,58 @@ defmodule JidoSwarm.Hive.FeedTest do
     end
   end
 
+  describe "what the rule decided" do
+    test "a write that loses to a higher stamp is announced as lost", %{
+      a: a,
+      feed: feed,
+      mesh: mesh
+    } do
+      {:ok, kept} =
+        Context.assert(a, "task:t_1", ["HiveTask"], %{"title" => "kept"}, topic: "hive.board")
+
+      assert_receive {:hive_delta, %{local: true}}
+
+      # A stale write from another pod: it arrives, the ticker shows it, and
+      # then the graph reports it lost.
+      stale =
+        Context.Delta.new("hive.board", "pod-b", 0, [
+          {:put_node, "task:t_1", ["HiveTask"], %{"title" => "stale"}},
+          {:put_edge, "task:t_1", "IN_GOAL", "goal:g_1", %{}}
+        ])
+
+      :ok = Context.Mesh.publish(mesh, stale)
+      stale_id = stale.id
+      assert_receive {:hive_delta, %{id: ^stale_id, origin: "pod-b", outcome: nil}}
+
+      assert_receive {:hive_outcome,
+                      %{id: ^stale_id, origin: "pod-b", superseded: ["task:t_1"], tombstoned: []}},
+                     2_000
+
+      assert {:ok, %{props: %{"title" => "kept", "_seq" => seq}}} = Context.fetch(a, "task:t_1")
+      assert seq == kept.seq
+
+      [entry | _] = Feed.recent(feed, 5)
+      assert entry.id == stale_id and entry.outcome == %{superseded: 1, applied: 1}
+
+      theirs = Enum.find(Feed.origins(feed), &(&1.origin == "pod-b"))
+      assert theirs.superseded == 1 and theirs.tombstoned == 0
+    end
+
+    test "a duplicate delivery is counted against its origin", %{feed: feed, mesh: mesh} do
+      delta =
+        Context.Delta.new("hive.board", "pod-b", 1, [
+          {:put_node, "note:n_1", ["HiveNote"], %{"text" => "x"}}
+        ])
+
+      :ok = Context.Mesh.publish(mesh, delta)
+      :ok = Context.Mesh.deliver(mesh, delta)
+      :ok = Context.Mesh.sync(mesh)
+      assert_receive {:hive_delta, _}
+
+      assert Enum.find(Feed.origins(feed), &(&1.origin == "pod-b")).duplicates == 1
+    end
+  end
+
   test "reset forgets everything", %{b: b, feed: feed} do
     {:ok, _} = Context.assert(b, "note:n_1", ["HiveNote"], %{"text" => "n"}, topic: "hive.memory")
     assert_receive {:hive_delta, _}
