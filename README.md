@@ -61,6 +61,10 @@ packs that brief a newcomer from what others wrote, weighted and disputable
 insights, skill-routed questions — all converging over the mesh by
 construction. See [`docs/HIVE.md`](docs/HIVE.md).
 
+A steward keeps the board fed: a standing goal with one live task per
+repository, re-opened round after round (`SWARM_STANDING_GOAL`,
+`SWARM_CYCLE_EVERY_MS`), so the swarm learns without being clicked.
+
 The Hive tab shows the shared memory *as* shared: which pod you are on, how
 much of its graph other pods wrote, the graph itself drawn live and coloured
 by origin, deltas as they arrive, a "ping the mesh" that every other pod

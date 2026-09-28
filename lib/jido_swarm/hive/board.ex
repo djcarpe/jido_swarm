@@ -36,7 +36,9 @@ defmodule JidoSwarm.Hive.Board do
   """
   @spec add_goal(map()) :: {:ok, String.t()} | {:error, term()}
   def add_goal(attrs) do
-    key = "goal:" <> Store.new_id("g")
+    # A caller may fix the key so that two pods writing the same goal
+    # converge on one entity (see `JidoSwarm.Hive.Steward`).
+    key = get(attrs, :key, nil) || "goal:" <> Store.new_id("g")
 
     props = %{
       title: req!(attrs, :title),
@@ -55,7 +57,7 @@ defmodule JidoSwarm.Hive.Board do
   """
   @spec add_task(map()) :: {:ok, String.t()} | {:error, term()}
   def add_task(attrs) do
-    key = "task:" <> Store.new_id("t")
+    key = get(attrs, :key, nil) || "task:" <> Store.new_id("t")
     parent = get(attrs, :parent, nil)
     goal = get(attrs, :goal, nil) || (parent && goal_of(parent))
 

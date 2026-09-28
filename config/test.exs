@@ -20,3 +20,7 @@ config :phoenix_live_view,
 # Sort query params output of verified routes for robust url comparisons
 config :phoenix,
   sort_verified_routes_query_params: true
+
+# The steward would seed the shared test graph a few seconds into a run;
+# tests exercise it on private graphs instead.
+config :jido_swarm, standing_goal: "off"

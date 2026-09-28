@@ -57,7 +57,9 @@ defmodule JidoSwarm.Application do
         {Jido.Context.Mesh, name: JidoSwarm.mesh(), transports: mesh_transports()},
         {Jido.Context.Graph, graph_opts()},
         # After the graph: the feed asks it for its origin at startup.
-        JidoSwarm.Hive.Feed
+        JidoSwarm.Hive.Feed,
+        # The standing order that keeps the board, and so the agents, busy.
+        JidoSwarm.Hive.Steward
       ]
     else
       Logger.warning("""

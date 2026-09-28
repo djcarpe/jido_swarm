@@ -210,6 +210,19 @@ Resources: `hive://board` and `hive://task/{key}`. Prompts: `hive_worker` (the
 playbook for working the board) and `hive_planner` (turning a goal into
 parallel tasks).
 
+## The standing order
+
+Nothing happens on an empty board, and agents do not invent goals. Every pod
+runs a `JidoSwarm.Hive.Steward`: on a tick (every `SWARM_CYCLE_EVERY_MS`,
+default thirty minutes, and a few seconds after boot) it makes sure the board
+holds one standing goal (`goal:standing`, title from `SWARM_STANDING_GOAL`,
+`off` to disable) and, for each repository, one live task under it —
+"survey it, record what you learn as insights, ask what is unclear, split off
+one improvement, finish with a summary". When a repository's task is done or
+failed, the next tick opens the next round. Keys are deterministic
+(`task:standing:<repo>:<round>`), so two pods seeding at once converge on one
+board instead of two.
+
 ## Seeing the mesh
 
 "Replicated to every pod" is a claim; the Hive tab of the console makes it

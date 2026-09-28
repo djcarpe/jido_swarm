@@ -85,7 +85,16 @@ config :jido_swarm,
   hive_poll_ms: String.to_integer(System.get_env("SWARM_HIVE_POLL_MS", "5000")),
   worker_skills:
     System.get_env("SWARM_WORKER_SKILLS", "elixir,rust,research,design,writing,review")
-    |> String.split(",", trim: true)
+    |> String.split(",", trim: true),
+  # The steward keeps one live task per repository under a standing goal and
+  # opens the next round when one finishes; "off" leaves the board to the
+  # operator and MCP agents alone.
+  standing_goal:
+    System.get_env(
+      "SWARM_STANDING_GOAL",
+      "Keep learning the repositories: survey them, propose improvements, implement the good ones"
+    ),
+  cycle_every_ms: String.to_integer(System.get_env("SWARM_CYCLE_EVERY_MS", "1800000"))
 
 # Only the workspace and identity are overridden here. The repository list
 # itself stays in config.exs: each entry's `:source` is a local checkout that
