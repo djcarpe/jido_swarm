@@ -217,6 +217,114 @@ defmodule JidoSwarmWeb.HiveComponents do
     """
   end
 
+  @sections [
+    task: "Task",
+    why: "Why",
+    handoffs: "Handoffs",
+    inputs: "Inputs",
+    decisions: "Decisions",
+    knowledge: "Knowledge",
+    questions: "Questions",
+    around: "Around"
+  ]
+
+  @doc """
+  What an agent would be handed for a task, and how every agent scores it:
+  the context pack section by section, and the rule's arithmetic per agent.
+  """
+  attr :hive, :map, required: true
+  attr :explain, :any, default: nil
+  attr :mesh, :map, required: true
+
+  def explain_panel(assigns) do
+    assigns = assign(assigns, sections: @sections)
+
+    ~H"""
+    <div id="hive-explain" class="space-y-1 text-xs">
+      <form id="hive-explain-form" phx-change="hive_explain" class="flex items-center gap-1">
+        <span class="opacity-60">Explain</span>
+        <select name="task" class="select select-bordered select-xs flex-1">
+          <option value="">pick a task…</option>
+          <option
+            :for={t <- @hive.in_flight ++ @hive.open}
+            value={t.key}
+            selected={@explain && @explain.task.key == t.key}
+          >
+            {t.title}
+          </option>
+        </select>
+        <button
+          :if={@explain}
+          type="button"
+          class="btn btn-xs btn-ghost"
+          phx-click="hive_explain_clear"
+        >
+          clear
+        </button>
+      </form>
+
+      <div :if={@explain} class="space-y-2">
+        <div class="opacity-60">
+          What an agent picking <span class="font-mono">{@explain.task.key}</span>
+          is handed — {byte_size(@explain.pack.markdown)} characters from {length(@explain.keys)} entities,
+          lit on the canvas.
+        </div>
+        <div :for={{section, title} <- @sections} :if={@explain.pack.sections[section] != ""}>
+          <details class="collapse collapse-arrow bg-base-200/40 rounded-box">
+            <summary class="collapse-title min-h-0 py-1 px-2 text-xs">
+              {title}
+              <span class="opacity-60">· {length(@explain.pack.sources[section] || [])} entities</span>
+            </summary>
+            <div class="collapse-content px-2">
+              <pre class="whitespace-pre-wrap font-mono text-[11px] opacity-80">{@explain.pack.sections[section]}</pre>
+            </div>
+          </details>
+        </div>
+
+        <div :if={@explain.scores != []} class="space-y-1">
+          <div class="opacity-60">
+            How each active agent scores it (the pick adds up to 1 point of jitter)
+          </div>
+          <div :for={row <- @explain.scores} class="space-y-0.5">
+            <div class="flex justify-between gap-2">
+              <span>
+                <span class="font-mono">{row.name}</span>
+                <span class="opacity-60">{Enum.join(row.skills, ", ")}</span>
+                <span :if={not row.eligible} class="badge badge-xs badge-ghost">not eligible</span>
+              </span>
+              <span class="font-mono tabular-nums">{row.score}</span>
+            </div>
+            <div class="flex h-1.5 rounded overflow-hidden bg-base-300" title={why_title(row.why)}>
+              <div class="bg-primary" style={"width: #{bar(row.why.priority * 10, row.score)}%"}>
+              </div>
+              <div class="bg-success" style={"width: #{bar(row.why.skill_fit * 6, row.score)}%"}>
+              </div>
+              <div class="bg-info" style={"width: #{bar(row.why.record * 2, row.score)}%"}></div>
+              <div class="bg-warning" style={"width: #{bar(row.why.neglect, row.score)}%"}></div>
+            </div>
+          </div>
+          <div class="opacity-60">
+            <span class="text-primary">■</span>
+            priority <span class="text-success">■</span>
+            skill fit <span class="text-info">■</span>
+            record <span class="text-warning">■</span>
+            neglect · heat and failures subtract
+          </div>
+        </div>
+        <div :if={@explain.scores == []} class="opacity-60">No active agent to score it.</div>
+      </div>
+    </div>
+    """
+  end
+
+  defp bar(part, score) when score > 0, do: Float.round(min(max(part / score, 0), 1) * 100, 1)
+  defp bar(_, _), do: 0
+
+  defp why_title(why) do
+    "priority #{why.priority}×10 · skill fit #{why.skill_fit}×6 · record #{why.record}×2 · " <>
+      "neglect +#{why.neglect} · heat −#{why.heat}×3 · failures −#{why.my_failures}×15"
+  end
+
   @doc "The last deltas, newest first: who wrote what, and how long it took to get here."
   attr :mesh, :map, required: true
   attr :limit, :integer, default: 12

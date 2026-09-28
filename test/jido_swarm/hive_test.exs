@@ -276,4 +276,54 @@ defmodule JidoSwarm.HiveTest do
   end
 
   defp status(key), do: Hive.task(key).status
+
+  describe "explaining a pick" do
+    test "the context pack names the entities each section came from", %{a: a, b: b} do
+      {:ok, goal} = Hive.add_goal(%{title: "ship", created_by: a})
+      {:ok, dep} = Hive.add_task(%{title: "design the index", goal: goal, created_by: a})
+
+      {:ok, task} =
+        Hive.add_task(%{
+          title: "build the index",
+          goal: goal,
+          depends_on: [dep],
+          skills: "rust",
+          created_by: a
+        })
+
+      {:ok, insight} = Hive.share(b, %{text: "the index must be built in rust", about: [task]})
+      {:ok, _claim} = JidoSwarm.Hive.Claims.claim(task, a)
+      :ok = Hive.progress(a, task, "started on the index")
+
+      {:ok, pack} = JidoSwarm.Hive.ContextPack.build(task)
+
+      assert pack.sources.task == [task]
+      assert pack.sources.why == [goal]
+      assert pack.sources.inputs == [dep]
+      assert [note] = pack.sources.handoffs
+      assert String.starts_with?(note, "note:")
+      assert insight in pack.sources.knowledge
+      assert ("agent:" <> a) in pack.sources.around
+      # Every key named is one the pack rendered.
+      for {section, keys} <- pack.sources, key <- keys, section not in [:around] do
+        assert pack.markdown =~ key or section in [:task, :why, :inputs, :handoffs]
+      end
+    end
+
+    test "every active agent's score for a task is spelled out", %{a: a, b: b} do
+      {:ok, task} = Hive.add_task(%{title: "port it", skills: "rust", priority: 4, created_by: a})
+
+      {:ok, rows} = JidoSwarm.Hive.Scheduler.explain(task)
+      by_agent = Map.new(rows, &{&1.agent, &1})
+
+      # bob has rust; alice does not, and the task is too young to be an orphan.
+      assert by_agent[b].eligible and by_agent[b].why.skill_fit == 1.0
+      refute by_agent[a].eligible
+      assert by_agent[b].score > by_agent[a].score
+      assert by_agent[b].why.priority == 4
+      assert hd(rows).agent == b
+
+      assert JidoSwarm.Hive.Scheduler.explain("task:nope") == {:error, :no_such_task}
+    end
+  end
 end

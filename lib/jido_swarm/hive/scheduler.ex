@@ -45,41 +45,89 @@ defmodule JidoSwarm.Hive.Scheduler do
 
     tasks
     |> Enum.filter(&(&1.status == "open"))
-    |> Enum.map(fn t ->
-      need = MapSet.new(t.skills || [])
-
-      fit =
-        if MapSet.size(need) == 0,
-          do: 0.5,
-          else: MapSet.size(MapSet.intersection(need, skills)) / MapSet.size(need)
-
-      rec = need |> Enum.map(&Map.get(record, &1, 0)) |> Enum.sum() |> min(5) |> Kernel./(5)
-      age = max(now - (t.created_at || now), 0)
-      neglect = min(age / 120_000, 5.0)
-      h = Map.get(heat, t.key, 0.0)
-      failed = Map.get(failures, t.key, 0)
-
-      score =
-        (t.priority || 3) * 10 + fit * 6 + rec * 2 + neglect - h * 3 - failed * 15 +
-          :rand.uniform()
-
-      eligible = fit > 0 or MapSet.size(need) == 0 or age >= @orphan_after
-
-      Map.merge(t, %{
-        score: Float.round(score * 1.0, 2),
-        eligible: eligible,
-        why: %{
-          priority: t.priority,
-          skill_fit: Float.round(fit * 1.0, 2),
-          record: Float.round(rec * 1.0, 2),
-          neglect: Float.round(neglect * 1.0, 2),
-          heat: Float.round(h * 1.0, 2),
-          my_failures: failed
-        }
-      })
-    end)
+    |> Enum.map(&score(&1, skills, record, failures, heat, now, :rand.uniform()))
     |> Enum.filter(& &1.eligible)
     |> Enum.sort_by(&(-&1.score))
+  end
+
+  @doc """
+  One task through every active agent's eyes: the score each would give it
+  and the parts that make it up, best first. Without the jitter, so the
+  numbers are the rule and nothing else; a real pick adds up to one point of
+  noise on top.
+  """
+  @spec explain(String.t()) :: {:ok, [map()]} | {:error, :no_such_task}
+  def explain(task_key) do
+    tasks = Board.tasks()
+
+    case Enum.find(tasks, &(&1.key == task_key)) do
+      nil ->
+        {:error, :no_such_task}
+
+      task ->
+        heat = Memory.heat()
+        now = Store.now()
+
+        rows =
+          Agents.active()
+          |> Enum.map(fn agent ->
+            scored =
+              score(
+                task,
+                MapSet.new(agent.skills || []),
+                track_record(agent.id, tasks),
+                failures(agent.id),
+                heat,
+                now,
+                0.0
+              )
+
+            %{
+              agent: agent.id,
+              name: agent.name,
+              kind: agent.kind,
+              skills: agent.skills || [],
+              score: scored.score,
+              eligible: scored.eligible,
+              why: scored.why
+            }
+          end)
+          |> Enum.sort_by(&(-&1.score))
+
+        {:ok, rows}
+    end
+  end
+
+  # The rule, once, for one task and one agent's skills, record and failures.
+  defp score(t, skills, record, failures, heat, now, jitter) do
+    need = MapSet.new(t.skills || [])
+
+    fit =
+      if MapSet.size(need) == 0,
+        do: 0.5,
+        else: MapSet.size(MapSet.intersection(need, skills)) / MapSet.size(need)
+
+    rec = need |> Enum.map(&Map.get(record, &1, 0)) |> Enum.sum() |> min(5) |> Kernel./(5)
+    age = max(now - (t.created_at || now), 0)
+    neglect = min(age / 120_000, 5.0)
+    h = Map.get(heat, t.key, 0.0)
+    failed = Map.get(failures, t.key, 0)
+
+    score = (t.priority || 3) * 10 + fit * 6 + rec * 2 + neglect - h * 3 - failed * 15 + jitter
+    eligible = fit > 0 or MapSet.size(need) == 0 or age >= @orphan_after
+
+    Map.merge(t, %{
+      score: Float.round(score * 1.0, 2),
+      eligible: eligible,
+      why: %{
+        priority: t.priority,
+        skill_fit: Float.round(fit * 1.0, 2),
+        record: Float.round(rec * 1.0, 2),
+        neglect: Float.round(neglect * 1.0, 2),
+        heat: Float.round(h * 1.0, 2),
+        my_failures: failed
+      }
+    })
   end
 
   @doc """

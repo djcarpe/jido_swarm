@@ -140,6 +140,24 @@ defmodule JidoSwarmWeb.ChatLiveTest do
       refute render_hook(view, "hive_clear", %{}) =~ "hive-drawer"
     end
 
+    test "explaining a task shows its pack and scores and lights the canvas", %{conn: conn} do
+      tag = System.unique_integer([:positive])
+      {:ok, view, _html} = live(conn, ~p"/")
+      view |> element("button", "Hive") |> render_click()
+
+      {:ok, task} = JidoSwarm.Hive.add_task(%{title: "Explain me #{tag}", created_by: "operator"})
+      assert eventually(fn -> render(view) =~ "Explain me #{tag}" end)
+
+      html = render_change(view, "hive_explain", %{"task" => task})
+      assert html =~ "is handed"
+      assert html =~ "Explain me #{tag}"
+      assert html =~ "How each active agent scores it" or html =~ "No active agent"
+      assert_push_event(view, "hive:highlight", %{keys: keys, label: label})
+      assert task in keys and label =~ "Explain me"
+
+      refute render_click(view, "hive_explain_clear", %{}) =~ "is handed"
+    end
+
     test "the Glider tab reports instrumentation", %{conn: conn} do
       JidoSwarm.GliderMetrics.reset()
       {:ok, view, _html} = live(conn, ~p"/")

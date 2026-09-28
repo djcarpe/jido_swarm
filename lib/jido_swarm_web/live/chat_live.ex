@@ -53,6 +53,7 @@ defmodule JidoSwarmWeb.ChatLive do
      |> assign(:expanded?, false)
      |> assign(:probes, [])
      |> assign(:conflict, nil)
+     |> assign(:explain, nil)
      |> load()
      |> load_hive()
      |> load_mesh()
@@ -230,6 +231,33 @@ defmodule JidoSwarmWeb.ChatLive do
       other ->
         {:noreply, assign(socket, :conflict, %{error: inspect(other)})}
     end
+  end
+
+  # The pack is built without an agent, so looking is not mistaken for
+  # interest: passing one would touch the task and raise its heat.
+  def handle_event("hive_explain", %{"task" => ""}, socket) do
+    {:noreply, socket |> assign(:explain, nil) |> push_event("hive:highlight", %{keys: []})}
+  end
+
+  def handle_event("hive_explain", %{"task" => key}, socket) do
+    with {:ok, pack} <-
+           canvas(fn -> JidoSwarm.Hive.ContextPack.build(key) end) || {:error, :unavailable},
+         {:ok, scores} <-
+           canvas(fn -> JidoSwarm.Hive.Scheduler.explain(key) end) || {:error, :unavailable} do
+      keys = pack.sources |> Map.values() |> List.flatten() |> Enum.uniq()
+      explain = %{task: pack.task, pack: pack, scores: scores, keys: keys}
+
+      {:noreply,
+       socket
+       |> assign(:explain, explain)
+       |> push_event("hive:highlight", %{keys: keys, label: "context pack for #{pack.task.title}"})}
+    else
+      _ -> {:noreply, put_flash(socket, :error, "That task could not be explained.")}
+    end
+  end
+
+  def handle_event("hive_explain_clear", _params, socket) do
+    {:noreply, socket |> assign(:explain, nil) |> push_event("hive:highlight", %{keys: []})}
   end
 
   def handle_event("hive_toggle_expand", _params, socket) do

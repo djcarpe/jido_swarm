@@ -22,7 +22,9 @@ defmodule JidoSwarm.Hive.ContextPack do
      instead of colliding
 
   Rendered as Markdown for a model's prompt; `build/2` also returns the
-  structured sections for tools that want data.
+  structured sections for tools that want data, and `sources` — the keys of
+  the entities each section was assembled from, so a console can point at
+  the exact nodes in the shared graph an agent was handed.
   """
 
   alias JidoSwarm.Hive.Agents
@@ -60,27 +62,53 @@ defmodule JidoSwarm.Hive.ContextPack do
         lineage =
           [task.key | Enum.map(chain, & &1.key)] ++ Enum.reject([task.goal], &(&1 in [nil, ""]))
 
+        notes = Memory.notes([task.key])
+        artifacts = Memory.artifacts(Enum.map(deps, & &1.key))
+
+        decisions =
+          Enum.filter(Memory.decisions(), &Enum.any?(&1.about, fn k -> k in lineage end))
+
+        insights = Memory.relevant(lineage ++ task.depends_on, task.title <> " " <> task.detail)
+
+        questions =
+          Enum.filter(Memory.questions(), &Enum.any?(&1.about, fn k -> k in lineage end))
+
+        active = Agents.active()
+
         sections = [
           {:task, render_task(task)},
           {:why, render_why(goal, chain)},
-          {:handoffs, render_notes(Memory.notes([task.key]))},
-          {:inputs, render_inputs(deps, Memory.artifacts(Enum.map(deps, & &1.key)))},
-          {:decisions,
-           render_decisions(
-             Enum.filter(Memory.decisions(), &Enum.any?(&1.about, fn k -> k in lineage end))
-           )},
-          {:knowledge,
-           render_insights(
-             Memory.relevant(lineage ++ task.depends_on, task.title <> " " <> task.detail)
-           )},
-          {:questions,
-           render_questions(
-             Enum.filter(Memory.questions(), &Enum.any?(&1.about, fn k -> k in lineage end))
-           )},
-          {:around, render_around(siblings, Agents.active())}
+          {:handoffs, render_notes(notes)},
+          {:inputs, render_inputs(deps, artifacts)},
+          {:decisions, render_decisions(decisions)},
+          {:knowledge, render_insights(insights)},
+          {:questions, render_questions(questions)},
+          {:around, render_around(siblings, active)}
         ]
 
-        {:ok, %{task: task, sections: Map.new(sections), markdown: fit(sections, budget)}}
+        # The same lists the sections were rendered from, cut where the
+        # renderers cut, as keys: what the agent was actually shown.
+        sources = %{
+          task: [task.key],
+          why: keys([goal | chain]),
+          handoffs: keys(Enum.take(notes, 8)),
+          inputs: keys(deps) ++ keys(artifacts),
+          decisions: keys(Enum.take(decisions, 8)),
+          knowledge: keys(insights),
+          questions:
+            keys(Enum.take(questions, 6)) ++
+              keys(Enum.flat_map(Enum.take(questions, 6), & &1.answers)),
+          around:
+            keys(Enum.take(siblings, 10)) ++ Enum.map(Enum.take(active, 12), &Agents.key(&1.id))
+        }
+
+        {:ok,
+         %{
+           task: task,
+           sections: Map.new(sections),
+           sources: sources,
+           markdown: fit(sections, budget)
+         }}
     end
   end
 
@@ -202,6 +230,8 @@ defmodule JidoSwarm.Hive.ContextPack do
       p -> if p in acc, do: Enum.reverse(acc), else: ancestors(p, by_key, [p | acc])
     end
   end
+
+  defp keys(items), do: items |> Enum.map(&(&1 && Map.get(&1, :key))) |> Enum.reject(&is_nil/1)
 
   defp skills([]), do: ""
   defp skills(s), do: " · skills: " <> Enum.join(s, ", ")
