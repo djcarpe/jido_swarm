@@ -61,6 +61,12 @@ packs that brief a newcomer from what others wrote, weighted and disputable
 insights, skill-routed questions — all converging over the mesh by
 construction. See [`docs/HIVE.md`](docs/HIVE.md).
 
+The Hive tab shows the shared memory *as* shared: which pod you are on, how
+much of its graph other pods wrote, the graph itself drawn live and coloured
+by origin, deltas as they arrive, a "ping the mesh" that every other pod
+answers through the graph, and a race between two pods' writes that the
+last-writer-wins rule settles in front of you.
+
 ## What the parts are
 
 | Module | Role |
@@ -163,6 +169,12 @@ Without `GITHUB_TOKEN` the work still happens — it stops after the commit, and
 the attempt says so.
 
 ## Instrumentation
+
+Besides the Glider engine events below, the vendored `Jido.Context` emits
+`[:jido, :context, :delta, :applied]` for every delta the graph applies,
+tallying operations applied, superseded or tombstoned, and
+`[:jido, :context, :mesh, :publish | :deliver | :duplicate]` from the mesh
+router. `JidoSwarm.Hive.Feed` consumes them for the Hive tab.
 
 Every call into Glider is wrapped in `:telemetry.span/3`, so the graph is
 measured at the one seam every operation passes through:

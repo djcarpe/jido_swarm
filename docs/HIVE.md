@@ -210,6 +210,30 @@ Resources: `hive://board` and `hive://task/{key}`. Prompts: `hive_worker` (the
 playbook for working the board) and `hive_planner` (turning a goal into
 parallel tasks).
 
+## Seeing the mesh
+
+"Replicated to every pod" is a claim; the Hive tab of the console makes it
+something to watch. Everything it shows is read off the same graph the
+agents write, plus one process, `JidoSwarm.Hive.Feed`, that subscribes to
+the mesh once and rebroadcasts each delta in the Hive's words.
+
+| Panel | What it proves |
+|---|---|
+| **You are on `<origin>` · N% written elsewhere** | this console is talking to one replica, and most of what that replica knows was stamped `_origin` by other pods — the memory is shared, not mirrored from a master |
+| **Origin chips** | per pod: deltas heard, highest `_seq`, arrival lag (its `ts` against our clock, so pod clocks matter), writes that *lost* |
+| **Replicas table** | rows are pods (asked over `:erpc`), columns are origins, cells are the highest sequence each holds; equal columns mean converged |
+| **The Hive mind** | the graph itself, force-laid, coloured by the pod that wrote each node; a delta from another pod arrives as a pulse in that pod's colour, a drop fades, a task's heat is a halo; click for the entity and its stamp, double-click to expand around it |
+| **Ping the mesh** | writes a `HiveProbe` here; every other pod's feed answers by writing a `HiveProbeAck` *through the graph*, and the round trip is timed when it lands — no channel outside the graph carries the reply |
+| **Race two writes** | writes `demo:conflict` from this pod and one other; every replica keeps the higher stamp and the console says which and why, in the words of the rule |
+| **On the wire** | the last deltas: origin, summary, `here` or lag, and `lost` when the graph reports the write superseded |
+| **Explain** | pick a task: the context pack an agent would be handed, section by section, with its source entities lit on the canvas, and every active agent's score for it as arithmetic |
+
+Two events in `Jido.Context` make the losing writes visible:
+`[:jido, :context, :delta, :applied]` tallies each delta's operations as
+applied, superseded (a higher stamp was already there) or tombstoned (a
+deletion won), and `[:jido, :context, :mesh, :publish | :deliver |
+:duplicate]` counts traffic through the router. The feed listens to both.
+
 ## Why Glider
 
 The board is a graph because the questions agents ask are graph questions:
