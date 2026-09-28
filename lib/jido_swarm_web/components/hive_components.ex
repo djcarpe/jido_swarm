@@ -360,6 +360,132 @@ defmodule JidoSwarmWeb.HiveComponents do
     """
   end
 
+  @doc """
+  Adding work, in a dialog of its own.
+
+  The tab re-renders whenever the board changes — every few seconds when the
+  swarm is busy — and an inline form loses what was typed. Here the draft is
+  state: every keystroke goes to the server, every render puts it back, so a
+  refresh mid-sentence changes nothing on screen.
+  """
+  attr :modal, :atom, default: nil
+  attr :goal_draft, :map, required: true
+  attr :task_draft, :map, required: true
+  attr :goals, :list, default: []
+
+  def hive_modal(assigns) do
+    ~H"""
+    <dialog
+      id="hive-modal"
+      class={["modal", @modal && "modal-open"]}
+      phx-window-keydown="hive_close"
+      phx-key="Escape"
+    >
+      <div class="modal-box max-w-lg space-y-3">
+        <form
+          :if={@modal == :goal}
+          id="hive-goal"
+          phx-change="hive_compose_goal"
+          phx-submit="hive_add_goal"
+          class="space-y-2"
+        >
+          <h3 class="font-semibold">New goal</h3>
+          <input
+            type="text"
+            name="title"
+            value={@goal_draft["title"]}
+            placeholder="What should the swarm achieve?"
+            class="input input-bordered input-sm w-full"
+            autofocus
+          />
+          <textarea
+            name="description"
+            placeholder="Why, and what done looks like (optional)"
+            class="textarea textarea-bordered textarea-sm w-full"
+            rows="3"
+          >{@goal_draft["description"]}</textarea>
+          <div class="flex items-center gap-2">
+            <label class="text-xs opacity-60">Priority</label>
+            <select name="priority" class="select select-bordered select-sm">
+              <option
+                :for={p <- 5..1//-1}
+                value={p}
+                selected={to_string(p) == @goal_draft["priority"]}
+              >
+                P{p}
+              </option>
+            </select>
+            <span class="flex-1"></span>
+            <button type="button" class="btn btn-sm btn-ghost" phx-click="hive_close">cancel</button>
+            <button type="submit" class="btn btn-sm btn-primary">add goal</button>
+          </div>
+        </form>
+
+        <form
+          :if={@modal == :task}
+          id="hive-task"
+          phx-change="hive_compose_task"
+          phx-submit="hive_add_task"
+          class="space-y-2"
+        >
+          <h3 class="font-semibold">New task</h3>
+          <input
+            type="text"
+            name="title"
+            value={@task_draft["title"]}
+            placeholder="What needs doing?"
+            class="input input-bordered input-sm w-full"
+            autofocus
+          />
+          <textarea
+            name="detail"
+            placeholder="Detail an agent needs: where to look, constraints (optional)"
+            class="textarea textarea-bordered textarea-sm w-full"
+            rows="3"
+          >{@task_draft["detail"]}</textarea>
+          <input
+            type="text"
+            name="acceptance"
+            value={@task_draft["acceptance"]}
+            placeholder="Done when… (optional)"
+            class="input input-bordered input-sm w-full"
+          />
+          <div class="flex flex-wrap items-center gap-2">
+            <input
+              type="text"
+              name="skills"
+              value={@task_draft["skills"]}
+              placeholder="skills, comma separated"
+              class="input input-bordered input-sm w-44"
+            />
+            <select name="goal" class="select select-bordered select-sm max-w-48">
+              <option value="">no goal</option>
+              <option :for={g <- @goals} value={g.key} selected={g.key == @task_draft["goal"]}>
+                {g.title}
+              </option>
+            </select>
+            <select name="priority" class="select select-bordered select-sm">
+              <option
+                :for={p <- 5..1//-1}
+                value={p}
+                selected={to_string(p) == @task_draft["priority"]}
+              >
+                P{p}
+              </option>
+            </select>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="flex-1"></span>
+            <button type="button" class="btn btn-sm btn-ghost" phx-click="hive_close">cancel</button>
+            <button type="submit" class="btn btn-sm btn-primary">add task</button>
+          </div>
+        </form>
+      </div>
+      <div class="modal-backdrop" phx-click="hive_close"></div>
+    </dialog>
+    """
+  end
+
   @doc "The last deltas, newest first: who wrote what, and how long it took to get here."
   attr :mesh, :map, required: true
   attr :limit, :integer, default: 12

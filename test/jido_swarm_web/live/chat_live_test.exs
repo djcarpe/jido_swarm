@@ -39,9 +39,14 @@ defmodule JidoSwarmWeb.ChatLiveTest do
       html = view |> element("button", "Hive") |> render_click()
       assert html =~ "claude mcp add --transport http hive"
 
+      view |> element("button[phx-value-what=goal]") |> render_click()
       view |> form("#hive-goal", %{title: "UI goal #{tag}", priority: "4"}) |> render_submit()
       [goal] = Enum.filter(JidoSwarm.Hive.goals(), &(&1.title == "UI goal #{tag}"))
       assert goal.priority == 4
+      # Submitting closes the dialog.
+      refute has_element?(view, "#hive-goal")
+
+      view |> element("button[phx-value-what=task]") |> render_click()
 
       html =
         view
@@ -55,6 +60,33 @@ defmodule JidoSwarmWeb.ChatLiveTest do
       [task] = Enum.filter(JidoSwarm.Hive.tasks(), &(&1.title == "UI task #{tag}"))
       assert task.goal == goal.key and task.skills == ["elixir", "ui"]
       assert task.created_by == "operator"
+    end
+
+    test "a draft in the dialog survives the board refreshing underneath it", %{conn: conn} do
+      tag = System.unique_integer([:positive])
+      {:ok, view, _html} = live(conn, ~p"/")
+      view |> element("button", "Hive") |> render_click()
+      view |> element("button[phx-value-what=task]") |> render_click()
+
+      view
+      |> form("#hive-task", %{title: "half typed #{tag}", detail: "and a detail"})
+      |> render_change()
+
+      # Someone else changes the board; the feed makes the tab re-read and
+      # re-render. The draft is state, so it is still there.
+      {:ok, _} = JidoSwarm.Hive.add_goal(%{title: "Elsewhere #{tag}", created_by: "agent"})
+      assert eventually(fn -> render(view) =~ "Elsewhere #{tag}" end)
+
+      html = render(view)
+      assert html =~ ~s(value="half typed #{tag}")
+      assert html =~ "and a detail"
+      assert has_element?(view, "#hive-modal.modal-open")
+
+      # Escape closes it and the draft is kept for next time.
+      render_keydown(view, "hive_close", %{"key" => "Escape"})
+      refute has_element?(view, "#hive-modal.modal-open")
+      view |> element("button[phx-value-what=task]") |> render_click()
+      assert render(view) =~ ~s(value="half typed #{tag}")
     end
 
     test "a board change made elsewhere reaches the Hive tab through the feed", %{conn: conn} do

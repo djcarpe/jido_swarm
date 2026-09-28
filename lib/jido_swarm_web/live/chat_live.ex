@@ -54,6 +54,9 @@ defmodule JidoSwarmWeb.ChatLive do
      |> assign(:probes, [])
      |> assign(:conflict, nil)
      |> assign(:explain, nil)
+     |> assign(:modal, nil)
+     |> assign(:goal_draft, empty_goal_draft())
+     |> assign(:task_draft, empty_task_draft())
      |> load()
      |> load_hive()
      |> load_mesh()
@@ -128,7 +131,42 @@ defmodule JidoSwarmWeb.ChatLive do
   end
 
   # The operator steers the Hive the same way any agent does: by adding work to
-  # the board. Nothing is assigned; agents pick it up by themselves.
+  # the board. Nothing is assigned; agents pick it up by themselves. The entry
+  # forms live in a dialog whose draft is kept here, so the board refreshing
+  # underneath cannot blank what is being typed.
+  def handle_event("hive_open", %{"what" => "goal"}, socket) do
+    {:noreply, assign(socket, :modal, :goal)}
+  end
+
+  def handle_event("hive_open", %{"what" => "task"}, socket) do
+    {:noreply, assign(socket, :modal, :task)}
+  end
+
+  def handle_event("hive_close", _params, socket) do
+    {:noreply, assign(socket, :modal, nil)}
+  end
+
+  def handle_event("hive_compose_goal", params, socket) do
+    {:noreply,
+     assign(
+       socket,
+       :goal_draft,
+       Map.merge(socket.assigns.goal_draft, Map.take(params, ~w(title description priority)))
+     )}
+  end
+
+  def handle_event("hive_compose_task", params, socket) do
+    {:noreply,
+     assign(
+       socket,
+       :task_draft,
+       Map.merge(
+         socket.assigns.task_draft,
+         Map.take(params, ~w(title detail acceptance skills goal priority))
+       )
+     )}
+  end
+
   def handle_event("hive_add_goal", %{"title" => title} = params, socket) do
     case String.trim(title) do
       "" ->
@@ -143,7 +181,12 @@ defmodule JidoSwarmWeb.ChatLive do
             created_by: "operator"
           })
 
-        {:noreply, socket |> put_flash(:info, "Goal added to the board.") |> load_hive()}
+        {:noreply,
+         socket
+         |> put_flash(:info, "Goal added to the board.")
+         |> assign(:modal, nil)
+         |> assign(:goal_draft, empty_goal_draft())
+         |> load_hive()}
     end
   end
 
@@ -164,7 +207,11 @@ defmodule JidoSwarmWeb.ChatLive do
           })
 
         {:noreply,
-         socket |> put_flash(:info, "Task added. An idle agent will pick it up.") |> load_hive()}
+         socket
+         |> put_flash(:info, "Task added. An idle agent will pick it up.")
+         |> assign(:modal, nil)
+         |> assign(:task_draft, empty_task_draft())
+         |> load_hive()}
     end
   end
 
@@ -590,6 +637,19 @@ defmodule JidoSwarmWeb.ChatLive do
       open_questions: [],
       recent_insights: [],
       agents: []
+    }
+  end
+
+  defp empty_goal_draft, do: %{"title" => "", "description" => "", "priority" => "3"}
+
+  defp empty_task_draft do
+    %{
+      "title" => "",
+      "detail" => "",
+      "acceptance" => "",
+      "skills" => "",
+      "goal" => "",
+      "priority" => "3"
     }
   end
 

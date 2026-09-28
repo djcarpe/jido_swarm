@@ -313,38 +313,17 @@
               </div>
             </div>
 
-            <form id="hive-goal" phx-submit="hive_add_goal" class="flex gap-1">
-              <input
-                type="text"
-                name="title"
-                placeholder="New goal…"
-                class="input input-bordered input-xs flex-1"
-              />
-              <select name="priority" class="select select-bordered select-xs">
-                <option :for={p <- 5..1//-1} value={p} selected={p == 3}>P{p}</option>
-              </select>
-              <button type="submit" class="btn btn-xs">add goal</button>
-            </form>
+            <div class="flex gap-1">
+              <button class="btn btn-xs" phx-click="hive_open" phx-value-what="goal">+ goal</button>
+              <button class="btn btn-xs" phx-click="hive_open" phx-value-what="task">+ task</button>
+            </div>
 
-            <form id="hive-task" phx-submit="hive_add_task" class="flex flex-wrap gap-1">
-              <input
-                type="text"
-                name="title"
-                placeholder="New task…"
-                class="input input-bordered input-xs flex-1 min-w-40"
-              />
-              <input
-                type="text"
-                name="skills"
-                placeholder="skills, comma separated"
-                class="input input-bordered input-xs w-40"
-              />
-              <select name="goal" class="select select-bordered select-xs max-w-40">
-                <option value="">no goal</option>
-                <option :for={g <- @hive.goals} value={g.key}>{g.title}</option>
-              </select>
-              <button type="submit" class="btn btn-xs">add task</button>
-            </form>
+            <.hive_modal
+              modal={@modal}
+              goal_draft={@goal_draft}
+              task_draft={@task_draft}
+              goals={@hive.goals}
+            />
 
             <div class="text-xs opacity-60">
               Agents join from anywhere over MCP:
