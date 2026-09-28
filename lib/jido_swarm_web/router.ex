@@ -23,6 +23,8 @@ defmodule JidoSwarmWeb.Router do
     pipe_through :browser
 
     live "/", ChatLive, :index
+    # This replica's graph as a JSON Lines download; see JidoSwarm.Knowledge.Export.
+    get "/export/:scope", ExportController, :show
   end
 
   # Probes, on the api pipeline so they neither fetch a session nor render a

@@ -325,6 +325,41 @@ defmodule JidoSwarmWeb.HiveComponents do
       "neglect +#{why.neglect} · heat −#{why.heat}×3 · failures −#{why.my_failures}×15"
   end
 
+  @doc """
+  Take the memory with you: this replica's graph as JSON Lines, whole or by
+  what it was published as.
+  """
+  attr :summary, :map, required: true
+
+  def export_links(assigns) do
+    assigns = assign(assigns, scopes: JidoSwarm.Knowledge.Export.scopes())
+
+    ~H"""
+    <div class="text-xs space-y-1">
+      <div class="opacity-60">
+        Download this replica's graph as JSON Lines
+        <span :if={@summary.graph[:nodes]}>
+          ({@summary.graph[:nodes]} nodes, {@summary.graph[:edges]} edges)
+        </span>
+        — Glider's export, with every mesh stamp; import it with
+        <code class="font-mono">Jido.Context.import/2</code>
+        or <code class="font-mono">glider … import</code>.
+      </div>
+      <div class="flex flex-wrap gap-1">
+        <a
+          :for={{scope, %{label: label}} <- @scopes}
+          href={"/export/#{scope}"}
+          download
+          class="btn btn-xs btn-outline"
+          title={"Download #{label} as .jsonl"}
+        >
+          ⤓ {label}
+        </a>
+      </div>
+    </div>
+    """
+  end
+
   @doc "The last deltas, newest first: who wrote what, and how long it took to get here."
   attr :mesh, :map, required: true
   attr :limit, :integer, default: 12

@@ -147,6 +147,15 @@ With `SWARM_S3_BUCKET` set, snapshots and a topic log go to object storage, so
 pods that share nothing but a bucket still converge, and a restarted pod boots
 knowing what the swarm already learned.
 
+### Taking the graph with you
+
+`GET /export/graph` downloads this replica's whole graph as JSON Lines —
+Glider's export, mesh stamps included — and `/export/knowledge`,
+`/export/context` and `/export/hive` cut it down to what was published on
+those topics, keeping only edges whose both ends are kept. The Hive and
+Glider tabs link to all four. The file imports back with
+`Jido.Context.import/2` or `glider <db> import`.
+
 ## Working on repositories
 
 The swarm clones each repository into its own workspace and works there. **It

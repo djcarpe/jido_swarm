@@ -151,11 +151,26 @@ defmodule JidoSwarm.Hive.Board do
   """
   @spec tasks() :: [map()]
   def tasks do
+    # A task node written by something other than add_task/1 — another tool
+    # over MCP, a hand-run Cypher — may lack any of these; the board reads
+    # them as their empty forms rather than crashing on the first render.
     raw =
       Store.all(
         "HiveTask",
         ~w(title detail acceptance priority skills created_by created_at goal parent)
       )
+      |> Enum.map(fn t ->
+        %{
+          t
+          | title: t.title || t.key,
+            detail: t.detail || "",
+            acceptance: t.acceptance || "",
+            priority: t.priority || 3,
+            skills: List.wrap(t.skills),
+            goal: t.goal || "",
+            parent: t.parent || ""
+        }
+      end)
 
     claims = Claims.all() |> Map.new(&{&1.task, &1})
     deps = Store.edges("DEPENDS_ON") |> Enum.group_by(& &1.from, & &1.to)

@@ -350,6 +350,8 @@
               Agents join from anywhere over MCP:
               <code class="font-mono block mt-1 select-all">claude mcp add --transport http hive {mcp_url()}</code>
             </div>
+
+            <.export_links :if={@graph_available?} summary={@summary} />
           </div>
 
           <div :if={@tab == :findings} class="space-y-2 pt-2">
@@ -426,6 +428,7 @@
           </div>
 
           <div :if={@tab == :glider} class="space-y-3 pt-2">
+            <.export_links :if={@graph_available?} summary={@summary} />
             <p :if={@glider.totals.calls == 0} class="text-xs opacity-60">
               No graph operations recorded yet.
             </p>
