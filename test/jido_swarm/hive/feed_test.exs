@@ -200,7 +200,10 @@ defmodule JidoSwarm.Hive.FeedTest do
       winner = {on_a["_seq"], on_a["_origin"]}
       stamps = [{mine.seq, mine.origin}, {theirs.seq, theirs.origin}]
       assert winner == Enum.max_by(stamps, fn {seq, origin} -> {seq, origin} end)
-      assert Feed.explain(winner, Enum.min(stamps)) =~ "wins"
+      # Either the clocks differed and the higher won, or they tied and the
+      # origin broke it; both are the rule, worded for the operator.
+      explanation = Feed.explain(winner, Enum.min(stamps))
+      assert explanation =~ "the higher clock wins" or explanation =~ "the origin breaks the tie"
     end
   end
 
