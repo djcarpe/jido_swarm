@@ -88,6 +88,58 @@ defmodule JidoSwarmWeb.ChatLiveTest do
              end)
     end
 
+    test "the canvas gets the graph, then every delta, and a node on request", %{conn: conn} do
+      tag = System.unique_integer([:positive])
+      {:ok, view, _html} = live(conn, ~p"/")
+      me = Jido.Context.Graph.origin(JidoSwarm.graph())
+
+      # The container is always in the DOM, so the hook survives tab changes.
+      assert has_element?(view, "#hive-frame.hidden #hive-mind")
+      view |> element("button", "Hive") |> render_click()
+      assert has_element?(view, "#hive-frame #hive-mind")
+      refute has_element?(view, "#hive-frame.hidden")
+
+      # The hook asks for the snapshot when it mounts.
+      render_hook(view, "hive_snapshot", %{})
+      assert_push_event(view, "hive:snapshot", %{nodes: nodes, me: ^me, colors: colors})
+      assert is_list(nodes) and is_map(colors)
+
+      # A write anywhere becomes drawing instructions.
+      {:ok, goal} = JidoSwarm.Hive.add_goal(%{title: "Canvas goal #{tag}", created_by: "agent"})
+      assert_push_event(view, "hive:delta", %{origin: ^me, local: true, ops: ops}, 2_000)
+      assert [%{op: "put_node", node: %{key: ^goal, kind: "goal", origin: ^me}}] = ops
+
+      # Selecting a node opens the drawer with its stamp and properties.
+      html = render_hook(view, "hive_select", %{"key" => goal})
+      assert html =~ "Canvas goal #{tag}"
+      assert html =~ "written by"
+      assert html =~ ~r/seq \d+/
+      assert html =~ "hive.board"
+      assert_push_event(view, "hive:select", %{key: ^goal})
+
+      # Asking for its surroundings patches the canvas.
+      render_hook(view, "hive_expand_node", %{"key" => goal})
+      assert_push_event(view, "hive:patch", %{nodes: _, edges: _})
+
+      # Filters go straight to the hook.
+      view
+      |> form("#hive-filters", %{"kinds" => ["goal"], "window" => "60000"})
+      |> render_change()
+
+      assert_push_event(view, "hive:filter", %{
+        kinds: ["goal"],
+        window_ms: 60_000,
+        remote_only: false
+      })
+
+      # Expanding is server state, so a re-render keeps it.
+      html = view |> element("button", "expand") |> render_click()
+      assert html =~ "hm-expanded"
+      assert has_element?(view, "button", "close")
+
+      refute render_hook(view, "hive_clear", %{}) =~ "hive-drawer"
+    end
+
     test "the Glider tab reports instrumentation", %{conn: conn} do
       JidoSwarm.GliderMetrics.reset()
       {:ok, view, _html} = live(conn, ~p"/")

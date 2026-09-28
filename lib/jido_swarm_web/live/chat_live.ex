@@ -48,6 +48,9 @@ defmodule JidoSwarmWeb.ChatLive do
      |> assign(:composer, "")
      |> assign(:tab, :findings)
      |> assign(:hive_refresh_pending?, false)
+     |> assign(:selected, nil)
+     |> assign(:filters, default_filters())
+     |> assign(:expanded?, false)
      |> load()
      |> load_hive()
      |> load_mesh()
@@ -162,6 +165,52 @@ defmodule JidoSwarmWeb.ChatLive do
     end
   end
 
+  # ---------------------------------------------------------------------------
+  # The canvas
+  # ---------------------------------------------------------------------------
+
+  # The hook asks for the graph when it mounts and again after a reconnect,
+  # so the picture is rebuilt from the graph rather than from what the
+  # browser remembers.
+  def handle_event("hive_snapshot", _params, socket) do
+    {:noreply, push_snapshot(socket)}
+  end
+
+  def handle_event("hive_select", %{"key" => key}, socket) do
+    selected = if key in [nil, ""], do: nil, else: canvas(fn -> Canvas.detail(key) end)
+
+    {:noreply,
+     socket
+     |> assign(:selected, selected)
+     |> push_event("hive:select", %{key: selected && selected.node.key})}
+  end
+
+  def handle_event("hive_clear", _params, socket) do
+    {:noreply, socket |> assign(:selected, nil) |> push_event("hive:select", %{key: nil})}
+  end
+
+  def handle_event("hive_expand_node", %{"key" => key}, socket) do
+    case canvas(fn -> Canvas.neighbours(key) end) do
+      nil -> {:noreply, socket}
+      around -> {:noreply, push_event(socket, "hive:patch", around)}
+    end
+  end
+
+  def handle_event("hive_filter", params, socket) do
+    filters = %{
+      kinds: List.wrap(params["kinds"]) |> Enum.reject(&(&1 == "")),
+      origins: List.wrap(params["origin"]) |> Enum.reject(&(&1 == "")),
+      window_ms: parse_window(params["window"]),
+      remote_only: params["remote_only"] in ["on", "true"]
+    }
+
+    {:noreply, socket |> assign(:filters, filters) |> push_event("hive:filter", filters)}
+  end
+
+  def handle_event("hive_toggle_expand", _params, socket) do
+    {:noreply, assign(socket, :expanded?, not socket.assigns.expanded?)}
+  end
+
   def handle_event("reset_metrics", _params, socket) do
     JidoSwarm.GliderMetrics.reset()
     {:noreply, socket |> put_flash(:info, "Glider metrics cleared.") |> load()}
@@ -210,7 +259,7 @@ defmodule JidoSwarmWeb.ChatLive do
   # the board also re-reads it, one re-read per burst — the first delta starts
   # the clock, the rest ride along.
   def handle_info({:hive_delta, entry}, socket) do
-    socket = tick(socket, entry)
+    socket = socket |> tick(entry) |> push_delta(entry)
 
     case entry.topic do
       "hive." <> _ -> {:noreply, schedule_hive_refresh(socket)}
@@ -219,7 +268,7 @@ defmodule JidoSwarmWeb.ChatLive do
   end
 
   def handle_info({:hive_burst, _count}, socket) do
-    {:noreply, socket |> load_mesh() |> schedule_hive_refresh()}
+    {:noreply, socket |> load_mesh() |> push_snapshot() |> schedule_hive_refresh()}
   end
 
   def handle_info(:hive_refresh, socket) do
@@ -234,9 +283,9 @@ defmodule JidoSwarmWeb.ChatLive do
   # runs off the render path with a short timeout; a partitioned pod reads as
   # unreachable rather than freezing the page.
   @impl true
-  def handle_async(:hive_peers, {:ok, {peers, authorship}}, socket) do
+  def handle_async(:hive_peers, {:ok, {peers, authorship, heat}}, socket) do
     mesh = %{socket.assigns.mesh | peers: peers, authorship: authorship}
-    {:noreply, assign(socket, :mesh, mesh)}
+    {:noreply, socket |> assign(:mesh, mesh) |> push_event("hive:heat", heat)}
   end
 
   def handle_async(:hive_peers, _failed, socket), do: {:noreply, socket}
@@ -339,7 +388,9 @@ defmodule JidoSwarmWeb.ChatLive do
 
   defp poll_peers(%{assigns: %{mesh: %{me: %{origin: me}}}} = socket) do
     if connected?(socket) do
-      start_async(socket, :hive_peers, fn -> {Feed.peers(), Canvas.authorship(me)} end)
+      start_async(socket, :hive_peers, fn ->
+        {Feed.peers(), Canvas.authorship(me), JidoSwarm.Hive.Memory.heat()}
+      end)
     else
       socket
     end
@@ -353,6 +404,52 @@ defmodule JidoSwarmWeb.ChatLive do
   end
 
   defp feed_up?, do: JidoSwarm.graph_available?() and is_pid(Process.whereis(Feed))
+
+  # The whole picture, for the hook: the newest entities, this replica's
+  # origin so the hook knows what "here" means, and the colours it draws in.
+  defp push_snapshot(%{assigns: %{mesh: %{me: %{origin: me}, colors: colors}}} = socket) do
+    case canvas(fn -> Canvas.snapshot() end) do
+      nil ->
+        socket
+
+      snapshot ->
+        push_event(socket, "hive:snapshot", Map.merge(snapshot, %{me: me, colors: colors}))
+    end
+  end
+
+  defp push_snapshot(socket), do: socket
+
+  defp push_delta(%{assigns: %{mesh: %{colors: colors}}} = socket, %{draw: ops} = entry) do
+    push_event(socket, "hive:delta", %{
+      id: entry.id,
+      origin: entry.origin,
+      local: entry.local,
+      ops: ops,
+      colors: colors
+    })
+  end
+
+  defp push_delta(socket, _entry), do: socket
+
+  # A read for the canvas is never allowed to take the page down with it.
+  defp canvas(fun) do
+    fun.()
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp default_filters, do: %{kinds: [], origins: [], window_ms: nil, remote_only: false}
+
+  defp parse_window(value) when value in [nil, "", "all"], do: nil
+
+  defp parse_window(value) do
+    case Integer.parse(value) do
+      {ms, _} when ms > 0 -> ms
+      _ -> nil
+    end
+  end
 
   defp empty_mesh do
     %{me: nil, origins: [], recent: [], peers: [], authorship: empty_authorship(), colors: %{}}

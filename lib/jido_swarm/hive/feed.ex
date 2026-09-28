@@ -206,10 +206,12 @@ defmodule JidoSwarm.Hive.Feed do
     now = now()
     entry = entry(delta, state.origin, now)
 
+    # The ring keeps the summary; the broadcast also carries what the canvas
+    # should draw, which is only ever needed once, right now.
     state =
       state
       |> record(delta, entry, now)
-      |> announce(entry, now)
+      |> announce(Map.put(entry, :draw, Canvas.delta_ops(delta)), now)
 
     {:noreply, state}
   end

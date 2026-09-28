@@ -196,11 +196,36 @@
             </button>
           </div>
 
-          <div :if={@tab == :hive} id="hive" class="space-y-3 pt-2 text-sm">
-            <%!-- The memory is shared: who wrote it, and what is arriving now. --%>
-            <.replica_strip :if={@mesh.me} mesh={@mesh} />
-            <.delta_ticker :if={@mesh.me} mesh={@mesh} />
+          <%!-- The memory is shared: who wrote it, drawn live, and what is arriving now.
+               The canvas container stays mounted across tabs (the hook keeps the
+               layout) and is only hidden; everything else in the pane re-renders. --%>
+          <div :if={@tab == :hive and @mesh.me} class="space-y-2 pt-2 text-sm">
+            <.replica_strip mesh={@mesh} />
+            <.canvas_toolbar filters={@filters} mesh={@mesh} expanded?={@expanded?} />
+          </div>
+          <div
+            id="hive-frame"
+            class={[
+              "hm-frame",
+              @expanded? && "hm-expanded",
+              (@tab != :hive or is_nil(@mesh.me)) && "hidden"
+            ]}
+          >
+            <div
+              id="hive-mind"
+              phx-hook="HiveMind"
+              phx-update="ignore"
+              data-me={@mesh.me && @mesh.me.origin}
+              class="hm rounded-box border border-base-300 bg-base-200/40"
+            >
+            </div>
+          </div>
+          <div :if={@tab == :hive and @mesh.me} class="space-y-3 text-sm">
+            <.node_drawer :if={@selected} selected={@selected} mesh={@mesh} />
+            <.delta_ticker mesh={@mesh} />
+          </div>
 
+          <div :if={@tab == :hive} id="hive" class="space-y-3 pt-2 text-sm">
             <div class="flex flex-wrap gap-1">
               <span
                 :for={status <- ~w(open claimed blocked split done failed)}

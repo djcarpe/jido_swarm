@@ -11,6 +11,8 @@ defmodule JidoSwarmWeb.HiveComponents do
 
   use Phoenix.Component
 
+  alias Phoenix.LiveView.JS
+
   @doc """
   This replica, how much of its memory came from elsewhere, and every origin
   it has heard from.
@@ -151,6 +153,143 @@ defmodule JidoSwarmWeb.HiveComponents do
     </div>
     """
   end
+
+  @kinds ~w(goal task claim agent insight question decision note artifact message)
+  @windows [
+    {"all time", ""},
+    {"last hour", "3600000"},
+    {"last 10 min", "600000"},
+    {"last minute", "60000"}
+  ]
+
+  @doc "What to draw: kinds, origins, how far back, and room to see it."
+  attr :filters, :map, required: true
+  attr :mesh, :map, required: true
+  attr :expanded?, :boolean, default: false
+
+  def canvas_toolbar(assigns) do
+    assigns = assign(assigns, kinds: @kinds, windows: @windows)
+
+    ~H"""
+    <form
+      id="hive-filters"
+      phx-change="hive_filter"
+      class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs"
+    >
+      <label
+        :for={kind <- @kinds}
+        class="flex items-center gap-1 cursor-pointer"
+        title={"show #{kind}s"}
+      >
+        <input
+          type="checkbox"
+          name="kinds[]"
+          value={kind}
+          checked={@filters.kinds == [] or kind in @filters.kinds}
+          class="checkbox checkbox-xs"
+        />
+        {kind}
+      </label>
+      <select name="origin" class="select select-bordered select-xs">
+        <option value="">every pod</option>
+        <option :for={o <- @mesh.origins} value={o.origin} selected={o.origin in @filters.origins}>
+          {o.origin}
+        </option>
+      </select>
+      <select name="window" class="select select-bordered select-xs">
+        <option
+          :for={{label, value} <- @windows}
+          value={value}
+          selected={to_string(@filters.window_ms || "") == value}
+        >
+          {label}
+        </option>
+      </select>
+      <label class="flex items-center gap-1 cursor-pointer" title="Only what other pods wrote">
+        <input
+          type="checkbox"
+          name="remote_only"
+          checked={@filters.remote_only}
+          class="checkbox checkbox-xs"
+        /> not written here
+      </label>
+      <span class="flex-1"></span>
+      <button
+        type="button"
+        class="btn btn-xs btn-ghost"
+        phx-click={JS.dispatch("hive:fit", to: "#hive-mind")}
+      >
+        fit
+      </button>
+      <button type="button" class="btn btn-xs btn-ghost" phx-click="hive_toggle_expand">
+        {if @expanded?, do: "close", else: "expand"}
+      </button>
+    </form>
+    """
+  end
+
+  @doc "One entity, in full: what it is, who wrote it and when, and what it touches."
+  attr :selected, :map, required: true
+  attr :mesh, :map, required: true
+
+  def node_drawer(assigns) do
+    ~H"""
+    <div id="hive-drawer" class="rounded-box border border-base-300 p-2 space-y-1 text-xs">
+      <div class="flex items-baseline gap-2">
+        <span class="badge badge-xs badge-outline">{@selected.node.kind}</span>
+        <span class="font-semibold truncate flex-1">{@selected.node.caption}</span>
+        <button
+          class="btn btn-ghost btn-xs"
+          phx-click="hive_expand_node"
+          phx-value-key={@selected.node.key}
+        >
+          around
+        </button>
+        <button class="btn btn-ghost btn-xs" phx-click="hive_clear">close</button>
+      </div>
+      <div class="font-mono opacity-70">{@selected.node.key}</div>
+      <div>
+        <span class="opacity-60">written by</span>
+        <span class="font-mono" style={"color: #{color(@mesh, @selected.stamp.origin)}"}>
+          {@selected.stamp.origin}
+        </span>
+        <span class="opacity-60">· seq {@selected.stamp.seq} · {age(@selected.stamp.age_ms)} · {@selected.stamp.topic}</span>
+      </div>
+      <table :if={@selected.props != %{}} class="table table-xs">
+        <tbody>
+          <tr :for={{k, v} <- Enum.sort(@selected.props)}>
+            <td class="opacity-60 w-24">{k}</td>
+            <td class="break-words">{format_value(v)}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div :if={@selected.neighbours != []} class="space-y-0.5">
+        <div class="opacity-60">connected to</div>
+        <button
+          :for={n <- @selected.neighbours}
+          class="flex items-center gap-1 w-full text-left hover:bg-base-200 rounded px-1"
+          phx-click="hive_select"
+          phx-value-key={n.key}
+        >
+          <span
+            class="inline-block w-2 h-2 rounded-full shrink-0"
+            style={"background: #{color(@mesh, n.origin)}"}
+          ></span>
+          <span class="font-mono opacity-60 shrink-0">{if n.dir == "out", do: "→", else: "←"} {n.type}</span>
+          <span class="truncate">{n.caption}</span>
+        </button>
+      </div>
+    </div>
+    """
+  end
+
+  defp age(nil), do: ""
+  defp age(ms) when ms < 60_000, do: "#{div(ms, 1000)}s ago"
+  defp age(ms) when ms < 3_600_000, do: "#{div(ms, 60_000)}m ago"
+  defp age(ms), do: "#{div(ms, 3_600_000)}h ago"
+
+  defp format_value(v) when is_list(v), do: Enum.map_join(v, ", ", &to_string/1)
+  defp format_value(v), do: to_string(v)
 
   defp color(mesh, origin), do: Map.get(mesh.colors, origin, "#64748b")
 
