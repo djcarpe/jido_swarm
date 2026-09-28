@@ -54,6 +54,166 @@ defmodule JidoSwarm.Hive.CanvasTest do
     end
   end
 
+  describe "snapshot/1" do
+    test "draws the newest entities, the edges between them, and says what was left out", %{
+      graph: graph
+    } do
+      {:ok, _} = Context.assert(graph, "goal:g_1", ["HiveGoal"], %{"title" => "ship"})
+
+      from_elsewhere(graph, "pod-b", 1, [
+        {:put_node, "task:t_1", ["HiveTask"], %{"title" => "write it"}},
+        {:put_edge, "task:t_1", "IN_GOAL", "goal:g_1", %{}},
+        {:put_edge, "task:t_1", "DEPENDS_ON", "task:t_0", %{}}
+      ])
+
+      snapshot = Canvas.snapshot()
+
+      assert snapshot.total == 3
+      refute snapshot.truncated
+      by_key = Map.new(snapshot.nodes, &{&1.key, &1})
+
+      assert %{kind: "goal", caption: "ship", origin: "pod-a", ghost: false} = by_key["goal:g_1"]
+      assert %{kind: "task", caption: "write it", origin: "pod-b", seq: 1} = by_key["task:t_1"]
+      # The dependency's end never arrived: the graph made a placeholder.
+      assert %{kind: "task", ghost: true, labels: []} = by_key["task:t_0"]
+
+      assert Enum.map(snapshot.edges, & &1.id) |> Enum.sort() ==
+               ["task:t_1|DEPENDS_ON|task:t_0", "task:t_1|IN_GOAL|goal:g_1"]
+
+      assert Enum.all?(snapshot.edges, &(&1.origin == "pod-b"))
+
+      # With room for two, the newest two are sent and the rest is counted.
+      small = Canvas.snapshot(cap: 2)
+      assert length(small.nodes) == 2
+      assert small.truncated and small.total == 3
+      kept = MapSet.new(small.nodes, & &1.key)
+
+      assert Enum.all?(
+               small.edges,
+               &(MapSet.member?(kept, &1.from) and MapSet.member?(kept, &1.to))
+             )
+    end
+
+    test "carries the heat on a task", %{graph: graph} do
+      {:ok, _} = Context.assert(graph, "task:t_1", ["HiveTask"], %{"title" => "hot"})
+      :ok = JidoSwarm.Hive.Memory.touch("agent:w1", "task:t_1")
+
+      [task] = Canvas.snapshot().nodes |> Enum.filter(&(&1.key == "task:t_1"))
+      assert task.heat > 0.9
+    end
+  end
+
+  describe "delta_ops/1" do
+    test "turns every operation into something to draw" do
+      delta =
+        Delta.new(
+          "hive.memory",
+          "pod-b",
+          7,
+          [
+            {:put_node, "insight:i_1", ["HiveInsight"], %{"text" => "slow"}},
+            {:put_edge, "insight:i_1", "ABOUT", "task:t_1", %{}},
+            {:drop_node, "note:n_1"},
+            {:drop_edge, "a", "ON", "b"}
+          ],
+          ts: 1_000
+        )
+
+      assert [
+               %{
+                 op: "put_node",
+                 node: %{
+                   key: "insight:i_1",
+                   kind: "insight",
+                   caption: "slow",
+                   origin: "pod-b",
+                   seq: 7,
+                   ts: 1_000,
+                   topic: "hive.memory",
+                   ghost: false
+                 }
+               },
+               %{
+                 op: "put_edge",
+                 edge: %{
+                   id: "insight:i_1|ABOUT|task:t_1",
+                   from: "insight:i_1",
+                   to: "task:t_1",
+                   type: "ABOUT",
+                   origin: "pod-b",
+                   seq: 7
+                 }
+               },
+               %{op: "drop_node", key: "note:n_1"},
+               %{op: "drop_edge", id: "a|ON|b"}
+             ] = Canvas.delta_ops(delta)
+    end
+  end
+
+  describe "detail/1, neighbours/1 and nodes/1" do
+    setup %{graph: graph} do
+      {:ok, _} =
+        Context.assert(graph, "goal:g_1", ["HiveGoal"], %{"title" => "ship", "priority" => 3})
+
+      from_elsewhere(graph, "pod-b", 1, [
+        {:put_node, "task:t_1", ["HiveTask"], %{"title" => "write it"}},
+        {:put_edge, "task:t_1", "IN_GOAL", "goal:g_1", %{}},
+        {:put_node, "insight:i_1", ["HiveInsight"], %{"text" => "hard"}},
+        {:put_edge, "insight:i_1", "ABOUT", "task:t_1", %{}}
+      ])
+
+      :ok
+    end
+
+    test "detail is the entity, its own properties, its stamp and its neighbours" do
+      detail = Canvas.detail("task:t_1")
+
+      assert detail.node.caption == "write it"
+      assert detail.props == %{"title" => "write it"}
+      assert %{origin: "pod-b", seq: 1, topic: "hive.board", age_ms: age} = detail.stamp
+      assert age >= 0
+
+      assert Enum.sort_by(detail.neighbours, & &1.key) == [
+               %{
+                 key: "goal:g_1",
+                 type: "IN_GOAL",
+                 dir: "out",
+                 kind: "goal",
+                 caption: "ship",
+                 origin: "pod-a"
+               },
+               %{
+                 key: "insight:i_1",
+                 type: "ABOUT",
+                 dir: "in",
+                 kind: "insight",
+                 caption: "hard",
+                 origin: "pod-b"
+               }
+             ]
+
+      assert Canvas.detail("task:nope") == nil
+    end
+
+    test "neighbours are what to add around a node" do
+      %{nodes: nodes, edges: edges} = Canvas.neighbours("task:t_1")
+
+      assert Enum.map(nodes, & &1.key) |> Enum.sort() == ["goal:g_1", "insight:i_1"]
+
+      assert Enum.map(edges, & &1.id) |> Enum.sort() == [
+               "insight:i_1|ABOUT|task:t_1",
+               "task:t_1|IN_GOAL|goal:g_1"
+             ]
+    end
+
+    test "nodes re-reads keys, skipping ones that are gone" do
+      assert [%{key: "goal:g_1", origin: "pod-a"}, %{key: "task:t_1", origin: "pod-b"}] =
+               Canvas.nodes(["goal:g_1", "task:t_1", "task:gone"]) |> Enum.sort_by(& &1.key)
+
+      assert Canvas.nodes([]) == []
+    end
+  end
+
   describe "authorship/1" do
     test "counts nodes and edges by the origin that wrote them", %{graph: graph} do
       {:ok, _} = Context.assert(graph, "goal:g_1", ["HiveGoal"], %{"title" => "ship"})
