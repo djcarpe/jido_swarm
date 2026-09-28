@@ -14,10 +14,14 @@
 //!   INDEX ON :Person(name)
 //!   STATS / SCHEMA / COMPACT / CLEAR / HELP
 
+use std::collections::BTreeSet;
+use std::rc::Rc;
 use std::collections::HashMap;
 
-use crate::algo;
-use crate::graph::{Dir, Error, Graph, Result};
+use std::collections::BTreeMap;
+use crate::algo::{self, Adjacency};
+use crate::graph::{Dir, Error, Graph, Projection as AlgoView, Result, Tier};
+use crate::ooc::StateVec;
 use crate::value::{parse_json, write_json_string, Value};
 
 // ------------------------------------------------------------------- tokens
@@ -40,7 +44,30 @@ impl Tok {
     }
 }
 
-fn lex(src: &str) -> Result<Vec<Tok>> {
+/// The tokens a parameter's value stands for: exactly what the literal
+/// would lex to, so a parameter works wherever a literal does (pattern
+/// properties included, so indexes still apply) and can never become syntax.
+fn value_tokens(v: &Value, out: &mut Vec<Tok>) {
+    match v {
+        Value::Null => out.push(Tok::Ident("null".into())),
+        Value::Bool(b) => out.push(Tok::Ident(if *b { "true" } else { "false" }.into())),
+        Value::Int(i) => out.push(Tok::Int(*i)),
+        Value::Float(f) => out.push(Tok::Float(*f)),
+        Value::Text(s) => out.push(Tok::Str(s.clone())),
+        Value::List(items) => {
+            out.push(Tok::Sym("[".into()));
+            for (i, x) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(Tok::Sym(",".into()));
+                }
+                value_tokens(x, out);
+            }
+            out.push(Tok::Sym("]".into()));
+        }
+    }
+}
+
+fn lex_with(src: &str, params: &[(String, Value)]) -> Result<Vec<Tok>> {
     let b: Vec<char> = src.chars().collect();
     let mut i = 0;
     let mut out = Vec::new();
@@ -128,6 +155,25 @@ fn lex(src: &str) -> Result<Vec<Tok>> {
             }
             i += 1;
             out.push(Tok::Str(s));
+            continue;
+        }
+        // `$name`: a parameter, replaced by its value.
+        if c == '$' {
+            i += 1;
+            let start = i;
+            while i < b.len() && (b[i].is_alphanumeric() || b[i] == '_') {
+                i += 1;
+            }
+            let name: String = b[start..i].iter().collect();
+            if name.is_empty() {
+                return Err(Error::Msg("expected a parameter name after $".into()));
+            }
+            let v = params
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v)
+                .ok_or_else(|| Error::Msg(format!("missing parameter ${name}")))?;
+            value_tokens(v, &mut out);
             continue;
         }
         // Backtick-quoted identifiers, for labels with spaces.
@@ -236,14 +282,14 @@ impl Parser {
 
 #[derive(Clone, Debug)]
 struct NodePat {
-    var: Option<String>,
+    var: Option<Rc<str>>,
     labels: Vec<String>,
     props: Vec<(String, Expr)>,
 }
 
 #[derive(Clone, Debug)]
 struct RelPat {
-    var: Option<String>,
+    var: Option<Rc<str>>,
     types: Vec<String>,
     dir: Dir,
     props: Vec<(String, Expr)>,
@@ -356,11 +402,16 @@ enum Stmt {
     Clear,
     Begin,
     Commit,
+    Rollback,
     Help,
 }
 
 fn parse(src: &str) -> Result<Stmt> {
-    let toks = lex(src)?;
+    parse_with(src, &[])
+}
+
+fn parse_with(src: &str, params: &[(String, Value)]) -> Result<Stmt> {
+    let toks = lex_with(src, params)?;
     if toks.is_empty() {
         return Err(Error::Msg("empty statement".into()));
     }
@@ -451,6 +502,9 @@ fn parse(src: &str) -> Result<Stmt> {
     }
     if p.eat_kw("COMMIT") {
         return Ok(Stmt::Commit);
+    }
+    if p.eat_kw("ROLLBACK") {
+        return Ok(Stmt::Rollback);
     }
     if p.eat_kw("HELP") {
         return Ok(Stmt::Help);
@@ -621,7 +675,7 @@ fn parse_chain(p: &mut Parser) -> Result<Chain> {
             if let Some(Tok::Ident(v)) = p.peek() {
                 let v = v.clone();
                 p.pos += 1;
-                rel.var = Some(v);
+                rel.var = Some(Rc::from(v));
             }
             while p.eat_sym(":") {
                 rel.types.push(p.ident()?);
@@ -685,7 +739,7 @@ fn parse_node_pat(p: &mut Parser) -> Result<NodePat> {
     if let Some(Tok::Ident(v)) = p.peek() {
         let v = v.clone();
         p.pos += 1;
-        pat.var = Some(v);
+        pat.var = Some(Rc::from(v));
     }
     while p.eat_sym(":") {
         pat.labels.push(p.ident()?);
@@ -934,7 +988,12 @@ fn const_value(e: &Expr) -> Result<Value> {
             Ok(Value::List(out))
         }
         Expr::Arith('-', a, b) => {
+            // `-5` parses as `0 - 5`; keep it an Int so a negative literal in
+            // CREATE or CALL does not silently become a float.
             let (x, y) = (const_value(a)?, const_value(b)?);
+            if let (Value::Int(x), Value::Int(y)) = (&x, &y) {
+                return Ok(Value::Int(x - y));
+            }
             match (x.as_f64(), y.as_f64()) {
                 (Some(x), Some(y)) => Ok(Value::Float(x - y)),
                 _ => Err(Error::Msg("expected a constant".into())),
@@ -952,10 +1011,12 @@ enum Bind {
     Edge(u64),
 }
 
-type Binds = Vec<(String, Bind)>;
+/// Variable bindings for one row. Names are shared with the pattern, so
+/// copying a row copies pointers, not strings.
+type Binds = Vec<(Rc<str>, Bind)>;
 
 fn lookup(binds: &Binds, var: &str) -> Option<Bind> {
-    binds.iter().find(|(k, _)| k == var).map(|(_, v)| *v)
+    binds.iter().find(|(k, _)| &**k == var).map(|(_, v)| *v)
 }
 
 // ------------------------------------------------------------------- results
@@ -1068,7 +1129,64 @@ pub fn edge_value(g: &Graph, id: u64) -> Value {
 // ------------------------------------------------------------------- execute
 
 pub fn execute(g: &mut Graph, src: &str) -> Result<QueryResult> {
-    let stmt = parse(src)?;
+    execute_with(g, src, &[])
+}
+
+/// Run a statement with parameters: `$name` in `src` stands for the value
+/// named `name`, anywhere a literal may appear.
+///
+/// ```
+/// # use glider::{Graph, query, value::Value};
+/// let mut g = Graph::memory();
+/// let p = [("name".to_string(), Value::from("Ada"))];
+/// query::execute_with(&mut g, "CREATE (:Person {name: $name})", &p).unwrap();
+/// let r = query::execute_with(&mut g, "MATCH (p:Person {name: $name}) RETURN p.name", &p).unwrap();
+/// assert_eq!(r.rows[0][0], Value::from("Ada"));
+/// ```
+pub fn execute_with(g: &mut Graph, src: &str, params: &[(String, Value)]) -> Result<QueryResult> {
+    let stmt = parse_with(src, params)?;
+    // STATS reports the damage itself; everything else must not return
+    // results computed from an image that failed a checksum along the way.
+    let reports_damage = matches!(stmt, Stmt::Stats);
+    let result = if matches!(stmt, Stmt::Begin | Stmt::Commit | Stmt::Rollback | Stmt::Compact | Stmt::Clear) {
+        run(g, stmt)
+    } else {
+        atomically(g, |g| run(g, stmt))
+    };
+    if !reports_damage {
+        if let Some(e) = g.integrity_error() {
+            return Err(Error::Msg(format!(
+                "database image is damaged: {e}. Run `glider <db> verify`; \
+                 restore from a replica if it confirms the damage"
+            )));
+        }
+    }
+    result
+}
+
+/// A statement is one transaction: all of it commits, or (on an error)
+/// none of it. Inside BEGIN it joins the open transaction instead.
+fn atomically<R>(g: &mut Graph, f: impl FnOnce(&mut Graph) -> Result<R>) -> Result<R> {
+    let auto = g.autocommit;
+    g.autocommit = false;
+    let r = f(g);
+    g.autocommit = auto;
+    if !auto || g.uncommitted() == 0 {
+        return r;
+    }
+    match r {
+        Ok(v) => {
+            g.commit()?;
+            Ok(v)
+        }
+        Err(e) => {
+            let _ = g.rollback();
+            Err(e)
+        }
+    }
+}
+
+fn run(g: &mut Graph, stmt: Stmt) -> Result<QueryResult> {
     match stmt {
         Stmt::Explain(inner) => explain(g, &inner),
         Stmt::Match {
@@ -1079,7 +1197,6 @@ pub fn execute(g: &mut Graph, src: &str) -> Result<QueryResult> {
         Stmt::Create(chains) => {
             let mut binds: Binds = Vec::new();
             let (n, e) = create_chains(g, &chains, &mut binds)?;
-            g.commit()?;
             let mut result = QueryResult::message(format!("created {} nodes, {} edges", n, e));
             let ids: Vec<Vec<Value>> = binds
                 .iter()
@@ -1113,7 +1230,7 @@ pub fn execute(g: &mut Graph, src: &str) -> Result<QueryResult> {
         }
         Stmt::Stats => {
             let s = g.stats();
-            let rows = vec![
+            let mut rows = vec![
                 vec![Value::Text("nodes".into()), Value::Int(s.nodes as i64)],
                 vec![Value::Text("edges".into()), Value::Int(s.edges as i64)],
                 vec![
@@ -1136,7 +1253,29 @@ pub fn execute(g: &mut Graph, src: &str) -> Result<QueryResult> {
                     Value::Text("file_bytes".into()),
                     Value::Int(s.file_bytes as i64),
                 ],
+                vec![
+                    Value::Text("page_size".into()),
+                    Value::Int(s.page_size as i64),
+                ],
+                vec![
+                    Value::Text("cached_pages".into()),
+                    Value::Int(s.cache_pages as i64),
+                ],
+                vec![
+                    Value::Text("log_bytes".into()),
+                    Value::Int(s.log_bytes as i64),
+                ],
             ];
+            if let Some((used, max)) = s.memory {
+                rows.push(vec![Value::Text("memory_bytes".into()), Value::Int(used as i64)]);
+                rows.push(vec![
+                    Value::Text("max_memory".into()),
+                    Value::Int(max.min(i64::MAX as u64) as i64),
+                ]);
+            }
+            if let Some(e) = s.integrity_error {
+                rows.push(vec![Value::Text("integrity_error".into()), Value::Text(e)]);
+            }
             Ok(QueryResult::table(
                 vec!["metric".into(), "value".into()],
                 rows,
@@ -1192,6 +1331,12 @@ pub fn execute(g: &mut Graph, src: &str) -> Result<QueryResult> {
             g.autocommit = true;
             Ok(QueryResult::message("committed"))
         }
+        Stmt::Rollback => {
+            let n = g.uncommitted();
+            g.rollback()?;
+            g.autocommit = true;
+            Ok(QueryResult::message(format!("rolled back {n} changes")))
+        }
         Stmt::Help => Ok(QueryResult::message(HELP.trim())),
     }
 }
@@ -1209,7 +1354,7 @@ glider query language
   MATCH (n:Person) WHERE n.age IS NULL SET n.age = 0, n:Unknown
   MATCH (n) WHERE id(n) = 4 DETACH DELETE n
   INDEX ON :Person(name)        DROP INDEX ON :Person(name)
-  STATS   SCHEMA   COMPACT   CLEAR   BEGIN   COMMIT
+  STATS   SCHEMA   COMPACT   CLEAR   BEGIN   COMMIT   ROLLBACK
 
 functions       id(n) labels(n) type(r) degree(n) indegree(n) outdegree(n)
                 length(x) lower(x) upper(x) abs(x) toInt(x) toFloat(x) coalesce(..)
@@ -1255,7 +1400,7 @@ fn explain(g: &Graph, stmt: &Stmt) -> Result<QueryResult> {
         let plan = plan_chain(g, chain, &binds, &pins);
         let name = |i: usize| -> String {
             let pat = &chain.nodes[i];
-            let var = pat.var.clone().unwrap_or_else(|| format!("_{i}"));
+            let var: Rc<str> = pat.var.clone().unwrap_or_else(|| format!("_{i}").into());
             if pat.labels.is_empty() {
                 format!("({var})")
             } else {
@@ -1263,10 +1408,14 @@ fn explain(g: &Graph, stmt: &Stmt) -> Result<QueryResult> {
             }
         };
 
+        let on = match plan.rel_anchor {
+            Some(i) => format!("{}-[:{}]-{}", name(i), chain.rels[i].types[0], name(i + 1)),
+            None => name(plan.anchor),
+        };
         rows.push(vec![
             Value::Int(pi as i64),
             Value::Text("anchor".into()),
-            Value::Text(name(plan.anchor)),
+            Value::Text(on),
             Value::Text(plan.reason.clone()),
             Value::Int(plan.estimate as i64),
         ]);
@@ -1355,30 +1504,217 @@ fn exec_match(
     filter: Option<&Expr>,
     tail: &Tail,
 ) -> Result<QueryResult> {
-    let mut rows: Vec<Binds> = vec![Vec::new()];
-    for chain in patterns {
-        let mut next: Vec<Binds> = Vec::new();
-        for binds in rows {
-            match_chain_filtered(g, chain, binds, filter, &mut next)?;
-        }
-        rows = next;
-    }
-    if let Some(f) = filter {
-        rows.retain(|b| eval(g, f, b).truthy());
-    }
-
+    // Reading tails consume matches as they are produced, so nothing larger
+    // than their own output is ever held.
     match tail {
-        Tail::Count => Ok(QueryResult::message(format!("{} matches", rows.len()))),
+        Tail::Count => {
+            let mut n = 0usize;
+            match_all(g, patterns, 0, Vec::new(), filter, &mut |_| {
+                n += 1;
+                Ok(true)
+            })?;
+            return Ok(QueryResult::message(format!("{} matches", n)));
+        }
         Tail::Return {
             kind,
             distinct,
             order,
             skip,
             limit,
-        } => project(g, rows, kind, *distinct, order, *skip, *limit),
+        } => {
+            if let Some(r) = count_from_counters(g, patterns, filter, tail) {
+                return Ok(r);
+            }
+            let mut proj = Projection::new(kind, *distinct, order, *skip, *limit);
+            let mut err = None;
+            match_all(g, patterns, 0, Vec::new(), filter, &mut |b| match proj.push(g, b) {
+                Ok(go) => Ok(go),
+                Err(e) => {
+                    err = Some(e);
+                    Ok(false)
+                }
+            })?;
+            if let Some(e) = err {
+                return Err(e);
+            }
+            return proj.finish();
+        }
+        _ => {}
+    }
+    // Writing tails need the full match set before they change anything.
+    // It is spooled (spilling to temp files past the working memory), then
+    // replayed in match order.
+    let budget = g.algorithm_memory();
+    let tmp = g.temp_dir();
+    crate::ooc::with_budget(budget, tmp, || exec_write(g, patterns, filter, tail))
+}
+
+/// `RETURN count(..)` over a pattern the store already counts: every node,
+/// one label, one index bucket, or one edge type. Answered from counters
+/// instead of enumerating the matches. `None` when the query needs the
+/// general path.
+fn count_from_counters(g: &Graph, patterns: &[Chain], filter: Option<&Expr>, tail: &Tail) -> Option<QueryResult> {
+    let Tail::Return { kind: ReturnKind::Items(items), distinct: false, skip: 0, limit, .. } = tail else {
+        return None;
+    };
+    if filter.is_some() || patterns.len() != 1 || items.len() != 1 || *limit == Some(0) {
+        return None;
+    }
+    let (expr, alias) = &items[0];
+    let Expr::Func(f, args) = expr else { return None };
+    if !f.eq_ignore_ascii_case("count") || args.len() != 1 {
+        return None;
+    }
+    let counted = match &args[0] {
+        Expr::Lit(Value::Text(s)) if s == "*" => None,
+        Expr::Var(v) => Some(v.as_str()),
+        _ => return None,
+    };
+    let chain = &patterns[0];
+    let plain = |n: &NodePat| n.labels.is_empty() && n.props.is_empty();
+    let n = match (chain.nodes.as_slice(), chain.rels.as_slice()) {
+        ([n], []) => {
+            if counted.is_some_and(|c| n.var.as_deref() != Some(c)) {
+                return None;
+            }
+            match (n.labels.as_slice(), n.props.as_slice()) {
+                ([], []) => g.node_count(),
+                ([l], []) => g.label_count(l),
+                ([l], [(k, Expr::Lit(v))]) if g.has_index(l, k) => g.indexed_lookup(l, k, v)?.len(),
+                _ => return None,
+            }
+        }
+        ([a, b], [r]) if !plain(a) && plain(b) && r.types.len() == 1 && r.props.is_empty() && r.hops.is_none()
+            && a.var.is_some() && a.var != b.var && a.var != r.var && counted.is_none_or(|c| Some(c) != a.var.as_deref()) =>
+        {
+            // count over one typed hop from anchored nodes: the adjacency
+            // range count of each anchor, no rows built.
+            let t = g.strings.lookup(&r.types[0]);
+            let mut n = 0usize;
+            let mut pins = Vec::new();
+            pinned_ids(filter, &mut pins);
+            let binds: Binds = Vec::new();
+            let src = anchor_source(g, a, &binds, &pins);
+            if !matches!(src, Source::Index) {
+                return None;
+            }
+            if let Some(t) = t {
+                for_each_candidate(g, a, &binds, &pins, false, &mut |id| {
+                    if node_matches(g, a, id, &binds) {
+                        n += g.degree_of(id, r.dir, Some(t));
+                    }
+                    Ok(true)
+                })
+                .ok()?;
+            }
+            n
+        }
+        ([a, b], [r]) => {
+            // Distinct variables only: `(e)-[:R]->(e)` is a self-loop filter.
+            let vars = [a.var.as_deref(), r.var.as_deref(), b.var.as_deref()];
+            let named: Vec<_> = vars.iter().flatten().collect();
+            if named.len() != named.iter().collect::<BTreeSet<_>>().len() {
+                return None;
+            }
+            if counted.is_some_and(|c| !named.contains(&&c)) {
+                return None;
+            }
+            if !plain(a) || !plain(b) || !r.props.is_empty() || r.hops.is_some() || r.dir == Dir::Both {
+                return None;
+            }
+            match r.types.as_slice() {
+                [] => g.edge_count(),
+                [t] => g.type_count(t),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    // As the general path: no matches, no rows.
+    let rows = if n == 0 { vec![] } else { vec![vec![Value::Int(n as i64)]] };
+    Some(QueryResult::table(vec![alias.clone()], rows))
+}
+
+/// Matched rows, spooled compactly: variable names once, then per row its
+/// length and (name, node-or-edge id) pairs.
+struct Spool {
+    names: Vec<Rc<str>>,
+    q: crate::ooc::SpillQueue<(u64, u64)>,
+}
+
+const EDGE_BIT: u64 = 1 << 63;
+
+impl Spool {
+    fn new() -> Spool {
+        Spool {
+            names: Vec::new(),
+            q: crate::ooc::SpillQueue::new(),
+        }
+    }
+
+    fn push(&mut self, b: &Binds) {
+        self.q.push_back((u64::MAX, b.len() as u64));
+        for (name, bind) in b {
+            let k = match self.names.iter().position(|n| n == name) {
+                Some(k) => k,
+                None => {
+                    self.names.push(name.clone());
+                    self.names.len() - 1
+                }
+            };
+            let v = match bind {
+                Bind::Node(id) => *id,
+                Bind::Edge(id) => *id | EDGE_BIT,
+            };
+            self.q.push_back((k as u64, v));
+        }
+    }
+
+    fn next(&mut self) -> Option<Binds> {
+        let (_, len) = self.q.pop_front()?;
+        let mut b = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            let (k, v) = self.q.pop_front()?;
+            let bind = if v & EDGE_BIT != 0 {
+                Bind::Edge(v & !EDGE_BIT)
+            } else {
+                Bind::Node(v)
+            };
+            b.push((self.names[k as usize].clone(), bind));
+        }
+        Some(b)
+    }
+}
+
+/// Ids in ascending order without duplicates, however many.
+fn sorted_ids(sorter: crate::storage::extsort::Sorter, mut f: impl FnMut(u64) -> Result<()>) -> Result<()> {
+    let io = |e: std::io::Error| Error::Msg(format!("sorting ids: {e}"));
+    let mut it = sorter.finish().map_err(io)?;
+    let mut last = None;
+    while let Some((k, _)) = it.next().map_err(io)? {
+        let id = u64::from_be_bytes(k[..8].try_into().unwrap());
+        if last != Some(id) {
+            f(id)?;
+            last = Some(id);
+        }
+    }
+    Ok(())
+}
+
+fn exec_write(g: &mut Graph, patterns: &[Chain], filter: Option<&Expr>, tail: &Tail) -> Result<QueryResult> {
+    let mut spool = Spool::new();
+    match_all(g, patterns, 0, Vec::new(), filter, &mut |b| {
+        spool.push(&b);
+        Ok(true)
+    })?;
+    let mut rows = std::iter::from_fn(move || spool.next());
+
+    match tail {
+        Tail::Count | Tail::Return { .. } => unreachable!("handled above"),
         Tail::Set(items) => {
             let mut touched = 0;
-            for binds in &rows {
+            for binds in rows.by_ref() {
+                let binds = &binds;
                 for item in items {
                     match item {
                         SetItem::Prop(var, key, expr) => {
@@ -1406,14 +1742,14 @@ fn exec_match(
                     }
                 }
             }
-            g.commit()?;
             let mut r = QueryResult::message(format!("set {} values", touched));
             r.touched = touched;
             Ok(r)
         }
         Tail::Remove(items) => {
             let mut touched = 0;
-            for binds in &rows {
+            for binds in rows.by_ref() {
+                let binds = &binds;
                 for item in items {
                     match item {
                         SetItem::Prop(var, key, _) => match lookup(binds, var) {
@@ -1436,39 +1772,39 @@ fn exec_match(
                     }
                 }
             }
-            g.commit()?;
             let mut r = QueryResult::message(format!("removed {} values", touched));
             r.touched = touched;
             Ok(r)
         }
         Tail::Delete(vars, _detach) => {
-            let mut nodes = Vec::new();
-            let mut edges = Vec::new();
-            for binds in &rows {
+            use crate::storage::extsort::Sorter;
+            let io = |e: std::io::Error| Error::Msg(format!("sorting ids: {e}"));
+            let dir = crate::ooc::temp_dir();
+            let per = (crate::ooc::budget_left().unwrap_or(1 << 30) / 4).clamp(1 << 20, 256 << 20) as usize;
+            let mut nodes = Sorter::new(&dir, "del-nodes", per).map_err(io)?;
+            let mut edges = Sorter::new(&dir, "del-edges", per).map_err(io)?;
+            for binds in rows.by_ref() {
                 for var in vars {
-                    match lookup(binds, var) {
-                        Some(Bind::Node(id)) => nodes.push(id),
-                        Some(Bind::Edge(id)) => edges.push(id),
+                    match lookup(&binds, var) {
+                        Some(Bind::Node(id)) => nodes.push(&id.to_be_bytes(), &[]).map_err(io)?,
+                        Some(Bind::Edge(id)) => edges.push(&id.to_be_bytes(), &[]).map_err(io)?,
                         None => return Err(Error::Msg(format!("unknown variable {}", var))),
                     }
                 }
             }
-            nodes.sort_unstable();
-            nodes.dedup();
-            edges.sort_unstable();
-            edges.dedup();
             let mut deleted = 0;
-            for id in edges {
+            sorted_ids(edges, |id| {
                 if g.delete_edge(id)? {
                     deleted += 1;
                 }
-            }
-            for id in nodes {
+                Ok(())
+            })?;
+            sorted_ids(nodes, |id| {
                 if g.delete_node(id)? {
                     deleted += 1;
                 }
-            }
-            g.commit()?;
+                Ok(())
+            })?;
             let mut r = QueryResult::message(format!("deleted {} entities", deleted));
             r.touched = deleted;
             Ok(r)
@@ -1476,13 +1812,11 @@ fn exec_match(
         Tail::Create(chains) => {
             let mut created_n = 0;
             let mut created_e = 0;
-            for binds in rows.iter() {
-                let mut b = binds.clone();
+            for mut b in rows.by_ref() {
                 let (n, e) = create_chains(g, chains, &mut b)?;
                 created_n += n;
                 created_e += e;
             }
-            g.commit()?;
             let mut r =
                 QueryResult::message(format!("created {} nodes, {} edges", created_n, created_e));
             r.touched = created_n + created_e;
@@ -1516,6 +1850,9 @@ struct Step {
 
 struct Plan {
     anchor: usize,
+    /// Start from the edges of one type instead: this relationship's two
+    /// endpoints are bound together, then the walk goes out both ways.
+    rel_anchor: Option<usize>,
     /// Estimated rows the anchor produces, and why.
     estimate: usize,
     reason: String,
@@ -1561,7 +1898,7 @@ fn estimate(g: &Graph, pat: &NodePat, binds: &Binds, pins: &[(String, u64)]) -> 
         if lookup(binds, v).is_some() {
             return (1, format!("bound variable {v}"));
         }
-        if pins.iter().any(|(name, _)| name == v) {
+        if pins.iter().any(|(name, _)| **name == **v) {
             return (1, format!("id({v}) predicate"));
         }
     }
@@ -1580,6 +1917,11 @@ fn estimate(g: &Graph, pat: &NodePat, binds: &Binds, pins: &[(String, u64)]) -> 
     (g.node_count(), "all nodes".to_string())
 }
 
+/// Whether the planner may anchor on an edge type. Tests turn it off to check
+/// that both plans give the same rows.
+#[doc(hidden)]
+pub static EDGE_ANCHORS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 fn plan_chain(g: &Graph, chain: &Chain, binds: &Binds, pins: &[(String, u64)]) -> Plan {
     let mut anchor = 0;
     let mut best = usize::MAX;
@@ -1593,10 +1935,31 @@ fn plan_chain(g: &Graph, chain: &Chain, binds: &Binds, pins: &[(String, u64)]) -
         }
     }
 
+    // An edge type can be the cheaper place to start: `()-[r:RARE]->()`
+    // should read the RARE edges, not every node's adjacency.
+    let mut rel_anchor = None;
+    let edges_ok = EDGE_ANCHORS.load(std::sync::atomic::Ordering::Relaxed);
+    for (i, rel) in chain.rels.iter().enumerate() {
+        if !edges_ok || rel.hops.is_some() || rel.types.len() != 1 {
+            continue;
+        }
+        let est = g.type_count(&rel.types[0]);
+        if est < best {
+            best = est;
+            rel_anchor = Some(i);
+            reason = format!("edges :{}", rel.types[0]);
+        }
+    }
+
     // Outward from the anchor: right as written, then left with directions
-    // flipped. Every step starts from a node bound by an earlier step.
+    // flipped. Every step starts from a node bound by an earlier step. An
+    // edge anchor binds nodes i and i+1, so the walk starts either side.
+    let (right_from, left_from) = match rel_anchor {
+        Some(i) => (i + 1, i),
+        None => (anchor, anchor),
+    };
     let mut steps = Vec::with_capacity(chain.rels.len());
-    for i in anchor..chain.rels.len() {
+    for i in right_from..chain.rels.len() {
         steps.push(Step {
             from: i,
             rel: i,
@@ -1604,7 +1967,7 @@ fn plan_chain(g: &Graph, chain: &Chain, binds: &Binds, pins: &[(String, u64)]) -
             reversed: false,
         });
     }
-    for i in (0..anchor).rev() {
+    for i in (0..left_from).rev() {
         steps.push(Step {
             from: i + 1,
             rel: i,
@@ -1614,11 +1977,39 @@ fn plan_chain(g: &Graph, chain: &Chain, binds: &Binds, pins: &[(String, u64)]) -
     }
 
     Plan {
-        anchor,
+        anchor: rel_anchor.unwrap_or(anchor),
+        rel_anchor,
         estimate: best,
         reason,
         steps,
     }
+}
+
+/// Where matched rows go. Returning `false` stops the match early.
+type Sink<'a> = dyn FnMut(Binds) -> Result<bool> + 'a;
+
+/// Match the comma-separated chains left to right, each against every
+/// binding the previous ones produced, then apply WHERE, streaming the
+/// survivors into `sink`. Returns false if the sink stopped it.
+fn match_all(
+    g: &Graph,
+    patterns: &[Chain],
+    i: usize,
+    binds: Binds,
+    filter: Option<&Expr>,
+    sink: &mut Sink<'_>,
+) -> Result<bool> {
+    if i == patterns.len() {
+        if let Some(f) = filter {
+            if !eval(g, f, &binds).truthy() {
+                return Ok(true);
+            }
+        }
+        return sink(binds);
+    }
+    match_chain_filtered(g, &patterns[i], binds, filter, &mut |b| {
+        match_all(g, patterns, i + 1, b, filter, sink)
+    })
 }
 
 fn match_chain_filtered(
@@ -1626,50 +2017,216 @@ fn match_chain_filtered(
     chain: &Chain,
     binds: Binds,
     filter: Option<&Expr>,
-    out: &mut Vec<Binds>,
-) -> Result<()> {
+    out: &mut Sink<'_>,
+) -> Result<bool> {
     let mut pins = Vec::new();
     pinned_ids(filter, &mut pins);
     let plan = plan_chain(g, chain, &binds, &pins);
+    if let Some(ri) = plan.rel_anchor {
+        return match_from_edges(g, chain, &plan, ri, binds, out);
+    }
     let pat = &chain.nodes[plan.anchor];
+    // A label scan's candidates carry the label already: with nothing else
+    // to check, they need no read. Otherwise read records by scanning.
+    let from_label_scan = matches!(anchor_source(g, pat, &binds, &pins), Source::Label | Source::All);
+    let already = from_label_scan && pat.labels.len() <= 1 && pat.props.is_empty();
+    let prime = from_label_scan && (pat.var.is_some() || filter.is_some() || !already);
 
-    for id in anchor_candidates(g, pat, &binds, &pins) {
-        if !node_matches(g, pat, id, &binds) {
-            continue;
+    let mut go = true;
+    for_each_candidate(g, pat, &binds, &pins, prime, &mut |id| {
+        if !already && !node_matches(g, pat, id, &binds) {
+            return Ok(true);
         }
         let mut b = binds.clone();
         if let Some(v) = &pat.var {
             match lookup(&b, v) {
-                Some(existing) if existing != Bind::Node(id) => continue,
+                Some(existing) if existing != Bind::Node(id) => return Ok(true),
                 Some(_) => {}
                 None => b.push((v.clone(), Bind::Node(id))),
             }
         }
         let mut bound = vec![None; chain.nodes.len()];
         bound[plan.anchor] = Some(id);
-        walk(g, chain, &plan.steps, 0, b, bound, out)?;
-    }
-    Ok(())
+        go = walk(g, chain, &plan.steps, 0, b, bound, &[], out)?;
+        Ok(go)
+    })?;
+    Ok(go)
 }
 
-/// Enumerate the anchor's candidate set, cheapest source first.
-fn anchor_candidates(g: &Graph, pat: &NodePat, binds: &Binds, pins: &[(String, u64)]) -> Vec<u64> {
-    if let Some(v) = &pat.var {
-        if let Some(Bind::Node(id)) = lookup(binds, v) {
-            return vec![id];
-        }
-        if let Some((_, id)) = pins.iter().find(|(name, _)| name == v) {
-            return if g.node(*id).is_some() {
-                vec![*id]
-            } else {
-                Vec::new()
-            };
+/// Bind a pattern variable, or check it against its existing binding.
+fn bind(b: &mut Binds, var: &Option<Rc<str>>, value: Bind) -> bool {
+    let Some(v) = var else { return true };
+    match lookup(b, v) {
+        Some(existing) => existing == value,
+        None => {
+            b.push((v.clone(), value));
+            true
         }
     }
-    candidate_nodes(g, pat, binds)
+}
+
+/// Match a chain anchored on the edges of one type, streamed in pages of
+/// edge ids.
+fn match_from_edges(g: &Graph, chain: &Chain, plan: &Plan, ri: usize, binds: Binds, out: &mut Sink<'_>) -> Result<bool> {
+    let rel = &chain.rels[ri];
+    let Some(t) = g.strings.lookup(&rel.types[0]) else {
+        return Ok(true);
+    };
+    let (lp, rp) = (&chain.nodes[ri], &chain.nodes[ri + 1]);
+    let mut result = Ok(true);
+    g.scan_type_edges(t, &mut |e| {
+        if !edge_props_match(g, rel, e.id, &binds) {
+            return true;
+        }
+        // As written, then (undirected) the other way round: the same rows
+        // a walk from either end would produce.
+        let ends: &[(u64, u64)] = match rel.dir {
+            Dir::Out => &[(e.from, e.to)],
+            Dir::In => &[(e.to, e.from)],
+            Dir::Both => &[(e.from, e.to), (e.to, e.from)],
+        };
+        for &(a, b_) in ends {
+            if !node_matches(g, lp, a, &binds) || !node_matches(g, rp, b_, &binds) {
+                continue;
+            }
+            let mut b = binds.clone();
+            if !bind(&mut b, &lp.var, Bind::Node(a))
+                || !bind(&mut b, &rel.var, Bind::Edge(e.id))
+                || !bind(&mut b, &rp.var, Bind::Node(b_))
+            {
+                continue;
+            }
+            let mut bound = vec![None; chain.nodes.len()];
+            bound[ri] = Some(a);
+            bound[ri + 1] = Some(b_);
+            match walk(g, chain, &plan.steps, 0, b, bound, &[e.id], out) {
+                Ok(true) => {}
+                other => {
+                    result = other;
+                    return false;
+                }
+            }
+        }
+        true
+    });
+    result
+}
+
+/// Candidate ids for an anchor, cheapest source first, streamed in pages
+/// of ids so a scan of a huge label or of every node never materialises the
+/// whole list. Stops when `f` returns false.
+#[derive(PartialEq)]
+enum Source {
+    Bound,
+    Pin,
+    Index,
+    Label,
+    All,
+}
+
+/// Where `for_each_candidate` will take an anchor's ids from.
+fn anchor_source(g: &Graph, pat: &NodePat, binds: &Binds, pins: &[(String, u64)]) -> Source {
+    if let Some(v) = &pat.var {
+        if let Some(Bind::Node(_)) = lookup(binds, v) {
+            return Source::Bound;
+        }
+        if pins.iter().any(|(name, _)| **name == **v) {
+            return Source::Pin;
+        }
+    }
+    for label in &pat.labels {
+        for (key, expr) in &pat.props {
+            if matches!(expr, Expr::Lit(_)) && g.has_index(label, key) {
+                return Source::Index;
+            }
+        }
+    }
+    if pat.labels.is_empty() {
+        Source::All
+    } else {
+        Source::Label
+    }
+}
+
+fn for_each_candidate(
+    g: &Graph,
+    pat: &NodePat,
+    binds: &Binds,
+    pins: &[(String, u64)],
+    prime: bool,
+    f: &mut dyn FnMut(u64) -> Result<bool>,
+) -> Result<bool> {
+    if let Some(v) = &pat.var {
+        if let Some(Bind::Node(id)) = lookup(binds, v) {
+            return f(id);
+        }
+        if let Some((_, id)) = pins.iter().find(|(name, _)| **name == **v) {
+            return if g.node(*id).is_some() { f(*id) } else { Ok(true) };
+        }
+    }
+    for label in &pat.labels {
+        for (key, expr) in &pat.props {
+            if let Expr::Lit(v) = expr {
+                if g.has_index(label, key) {
+                    if let Some(ids) = g.indexed_lookup(label, key, v) {
+                        for id in ids {
+                            if !f(id)? {
+                                return Ok(false);
+                            }
+                        }
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+    }
+    const PAGE: usize = 4096;
+    let label = match pat.labels.first() {
+        Some(l) => match g.strings.lookup(l) {
+            Some(id) => Some(id),
+            None => return Ok(true),
+        },
+        None => None,
+    };
+    if prime {
+        // Read records in id order with one cursor, each left in the read
+        // cache for the pattern check, WHERE and RETURN that follow.
+        let mut err = None;
+        let r = g.scan_nodes(label, 0, usize::MAX, &mut |id| match f(id) {
+            Ok(go) => go,
+            Err(e) => {
+                err = Some(e);
+                false
+            }
+        });
+        if let Some(e) = err {
+            return Err(e);
+        }
+        return Ok(r.is_some());
+    }
+    let mut from = 0u64;
+    loop {
+        let ids = match label {
+            Some(l) => g.label_members_from(l, from, PAGE),
+            None => g.nodes_from(from, PAGE),
+        };
+        let n = ids.len();
+        for id in ids {
+            if !f(id)? {
+                return Ok(false);
+            }
+            from = id + 1;
+        }
+        if n < PAGE {
+            return Ok(true);
+        }
+    }
 }
 
 /// Execute the plan, one step at a time, backtracking on failure.
+/// `used` holds the relationships this path has already traversed: as in
+/// Cypher, a match may not use the same relationship twice.
+#[allow(clippy::too_many_arguments)]
 fn walk(
     g: &Graph,
     chain: &Chain,
@@ -1677,11 +2234,11 @@ fn walk(
     i: usize,
     binds: Binds,
     bound: Vec<Option<u64>>,
-    out: &mut Vec<Binds>,
-) -> Result<()> {
+    used: &[u64],
+    out: &mut Sink<'_>,
+) -> Result<bool> {
     if i >= steps.len() {
-        out.push(binds);
-        return Ok(());
+        return out(binds);
     }
     let step = steps[i];
     let rel = &chain.rels[step.rel];
@@ -1693,7 +2250,7 @@ fn walk(
     };
     let current = match bound[step.from] {
         Some(id) => id,
-        None => return Ok(()),
+        None => return Ok(true),
     };
 
     let type_ids: Vec<u32> = rel
@@ -1702,7 +2259,7 @@ fn walk(
         .filter_map(|t| g.strings.lookup(t))
         .collect();
     if !rel.types.is_empty() && type_ids.len() != rel.types.len() {
-        return Ok(());
+        return Ok(true);
     }
 
     if let Some((min, max)) = rel.hops {
@@ -1711,8 +2268,9 @@ fn walk(
         seen.insert(current);
         for depth in 1..=max {
             let mut next = Vec::new();
+            let only = if type_ids.len() == 1 { Some(type_ids[0]) } else { None };
             for node in &frontier {
-                for adj in g.neighbors(*node, dir, None) {
+                for adj in g.neighbors(*node, dir, only) {
                     if !type_ids.is_empty() && !type_ids.contains(&adj.etype) {
                         continue;
                     }
@@ -1740,7 +2298,9 @@ fn walk(
                     }
                     let mut bound2 = bound.clone();
                     bound2[step.to] = Some(*id);
-                    walk(g, chain, steps, i + 1, b, bound2, out)?;
+                    if !walk(g, chain, steps, i + 1, b, bound2, used, out)? {
+                        return Ok(false);
+                    }
                 }
             }
             frontier = next;
@@ -1748,11 +2308,16 @@ fn walk(
                 break;
             }
         }
-        return Ok(());
+        return Ok(true);
     }
 
-    for adj in g.neighbors(current, dir, None) {
+    // One type: a range scan of just that type's adjacency.
+    let only = if type_ids.len() == 1 { Some(type_ids[0]) } else { None };
+    for adj in g.neighbors(current, dir, only) {
         if !type_ids.is_empty() && !type_ids.contains(&adj.etype) {
+            continue;
+        }
+        if used.contains(&adj.edge) {
             continue;
         }
         if !edge_props_match(g, rel, adj.edge, &binds) {
@@ -1778,48 +2343,37 @@ fn walk(
         }
         let mut bound2 = bound.clone();
         bound2[step.to] = Some(adj.other);
-        walk(g, chain, steps, i + 1, b, bound2, out)?;
-    }
-    Ok(())
-}
-
-fn candidate_nodes(g: &Graph, pat: &NodePat, binds: &Binds) -> Vec<u64> {
-    if let Some(v) = &pat.var {
-        if let Some(Bind::Node(id)) = lookup(binds, v) {
-            return vec![id];
+        let mut used2 = Vec::with_capacity(used.len() + 1);
+        used2.extend_from_slice(used);
+        used2.push(adj.edge);
+        if !walk(g, chain, steps, i + 1, b, bound2, &used2, out)? {
+            return Ok(false);
         }
     }
-    for label in &pat.labels {
-        for (key, expr) in &pat.props {
-            if let Expr::Lit(v) = expr {
-                if g.has_index(label, key) {
-                    if let Some(ids) = g.indexed_lookup(label, key, v) {
-                        return ids;
-                    }
-                }
-            }
-        }
-    }
-    if let Some(label) = pat.labels.first() {
-        return g.nodes_with_label(label);
-    }
-    g.node_ids()
+    Ok(true)
 }
 
+/// Whether node `id` satisfies a pattern's labels and properties. Ids come
+/// from adjacency, label, index or id scans, all of which only hold live
+/// nodes, so a pattern with neither needs no read at all; otherwise the
+/// record is read once for both checks.
 fn node_matches(g: &Graph, pat: &NodePat, id: u64, binds: &Binds) -> bool {
-    if g.node(id).is_none() {
-        return false;
+    if pat.labels.is_empty() && pat.props.is_empty() {
+        return true;
     }
+    let Some(n) = g.node(id) else {
+        return false;
+    };
     for label in &pat.labels {
         match g.strings.lookup(label) {
-            Some(l) if g.has_label(id, l) => {}
+            Some(l) if n.has_label(l) => {}
             _ => return false,
         }
     }
     for (key, expr) in &pat.props {
         let want = eval(g, expr, binds);
-        match g.node_prop(id, key) {
-            Some(got) if *got == want => {}
+        match g.strings.lookup(key).and_then(|k| n.prop(k)) {
+            Some(got) if got == want => {}
             _ => return false,
         }
     }
@@ -1830,7 +2384,7 @@ fn edge_props_match(g: &Graph, rel: &RelPat, edge: u64, binds: &Binds) -> bool {
     for (key, expr) in &rel.props {
         let want = eval(g, expr, binds);
         match g.edge_prop(edge, key) {
-            Some(got) if *got == want => {}
+            Some(got) if got == want => {}
             _ => return false,
         }
     }
@@ -1896,89 +2450,232 @@ fn create_chains(g: &mut Graph, chains: &[Chain], binds: &mut Binds) -> Result<(
 
 // --------------------------------------------------------------- projection
 
-fn project(
-    g: &Graph,
-    rows: Vec<Binds>,
-    kind: &ReturnKind,
-    distinct: bool,
-    order: &[(Expr, bool)],
-    skip: usize,
-    limit: Option<usize>,
-) -> Result<QueryResult> {
-    let items: Vec<(Expr, String)> = match kind {
-        ReturnKind::Items(items) => items.clone(),
-        ReturnKind::All => {
-            let mut vars: Vec<String> = Vec::new();
-            for b in &rows {
-                for (k, _) in b {
-                    if !vars.contains(k) {
-                        vars.push(k.clone());
-                    }
-                }
-            }
-            vars.into_iter()
-                .map(|v| (Expr::Var(v.clone()), v))
-                .collect()
-        }
-    };
+/// A row or group key, ordered by `total_cmp` with -0.0 folded into 0.0:
+/// every pair of values that `==` calls equal lands on the same key, so a
+/// lookup narrows to a few candidates that are then checked with `==`.
+#[derive(Clone)]
+struct EqKey(Vec<Value>);
 
-    let columns: Vec<String> = items.iter().map(|(_, a)| a.clone()).collect();
-    let has_agg = items.iter().any(|(e, _)| e.is_aggregate());
+fn fold_zero(v: &Value) -> Value {
+    match v {
+        Value::Float(f) if *f == 0.0 => Value::Float(0.0),
+        Value::List(items) => Value::List(items.iter().map(fold_zero).collect()),
+        other => other.clone(),
+    }
+}
 
-    let mut out_rows: Vec<Vec<Value>> = if has_agg {
-        // Implicit grouping on the non-aggregate items, as Cypher does.
-        let mut groups: Vec<(Vec<Value>, Vec<Binds>)> = Vec::new();
-        for binds in rows {
-            let key: Vec<Value> = items
-                .iter()
-                .filter(|(e, _)| !e.is_aggregate())
-                .map(|(e, _)| eval(g, e, &binds))
-                .collect();
-            match groups.iter_mut().find(|(k, _)| {
-                k.len() == key.len() && k.iter().zip(key.iter()).all(|(a, b)| a == b)
-            }) {
-                Some((_, members)) => members.push(binds),
-                None => groups.push((key, vec![binds])),
+impl EqKey {
+    fn of(row: &[Value]) -> EqKey {
+        EqKey(row.iter().map(fold_zero).collect())
+    }
+}
+
+impl PartialEq for EqKey {
+    fn eq(&self, o: &Self) -> bool {
+        self.cmp(o) == std::cmp::Ordering::Equal
+    }
+}
+impl Eq for EqKey {}
+impl PartialOrd for EqKey {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for EqKey {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        for (a, b) in self.0.iter().zip(o.0.iter()) {
+            let c = a.total_cmp(b);
+            if c != std::cmp::Ordering::Equal {
+                return c;
             }
         }
-        groups
-            .into_iter()
-            .map(|(_, members)| {
-                items
-                    .iter()
-                    .map(|(e, _)| {
-                        if e.is_aggregate() {
-                            eval_aggregate(g, e, &members)
-                        } else {
-                            members
-                                .first()
-                                .map(|b| eval(g, e, b))
-                                .unwrap_or(Value::Null)
-                        }
-                    })
-                    .collect()
-            })
-            .collect()
-    } else {
-        rows.iter()
-            .map(|b| items.iter().map(|(e, _)| eval(g, e, b)).collect())
-            .collect()
-    };
+        self.0.len().cmp(&o.0.len())
+    }
+}
 
-    if distinct {
-        let mut seen: Vec<Vec<Value>> = Vec::new();
-        out_rows.retain(|row| {
-            if seen.iter().any(|s| s == row) {
-                false
-            } else {
-                seen.push(row.clone());
-                true
+/// Rows, deduplicated by `==` keeping the first of each, in arrival order.
+#[derive(Default)]
+struct FirstSeen {
+    buckets: BTreeMap<EqKey, Vec<usize>>,
+}
+
+impl FirstSeen {
+    /// The index of an earlier row equal to `row`, or record `row` as `idx`.
+    fn find_or_add(&mut self, rows: &[Vec<Value>], row: &[Value], idx: usize) -> Option<usize> {
+        let bucket = self.buckets.entry(EqKey::of(row)).or_default();
+        for &i in bucket.iter() {
+            if rows[i].as_slice() == row {
+                return Some(i);
             }
-        });
+        }
+        bucket.push(idx);
+        None
+    }
+}
+
+/// One aggregate's running state.
+enum Acc {
+    Count(i64),
+    Sum(f64),
+    Avg(f64, u64),
+    Min(Option<Value>),
+    Max(Option<Value>),
+    Collect(Vec<Value>),
+    Other,
+}
+
+impl Acc {
+    fn new(e: &Expr) -> Acc {
+        let Expr::Func(name, _) = e else {
+            return Acc::Other;
+        };
+        match name.as_str() {
+            "count" => Acc::Count(0),
+            "sum" => Acc::Sum(0.0),
+            "avg" => Acc::Avg(0.0, 0),
+            "min" => Acc::Min(None),
+            "max" => Acc::Max(None),
+            "collect" => Acc::Collect(Vec::new()),
+            _ => Acc::Other,
+        }
     }
 
-    if !order.is_empty() {
-        let keys: Vec<(usize, bool)> = order
+    fn add(&mut self, g: &Graph, e: &Expr, binds: &Binds) {
+        let Expr::Func(_, args) = e else { return };
+        let arg = args.first();
+        let star = matches!(arg, Some(Expr::Lit(Value::Text(s))) if s == "*");
+        if let Acc::Count(n) = self {
+            // count only asks whether the value is null: never render it (a
+            // bound variable is never null).
+            let counts = match arg {
+                _ if star => true,
+                Some(Expr::Var(v)) => lookup(binds, v).is_some(),
+                Some(a) => !matches!(eval(g, a, binds), Value::Null),
+                None => false,
+            };
+            *n += counts as i64;
+            return;
+        }
+        let v = if star {
+            Value::Int(1)
+        } else {
+            match arg {
+                Some(a) => eval(g, a, binds),
+                None => return,
+            }
+        };
+        if matches!(v, Value::Null) {
+            return;
+        }
+        match self {
+            Acc::Sum(s) => {
+                if let Some(x) = v.as_f64() {
+                    *s += x;
+                }
+            }
+            Acc::Avg(s, n) => {
+                if let Some(x) = v.as_f64() {
+                    *s += x;
+                    *n += 1;
+                }
+            }
+            // First of equal minimums, last of equal maximums, as min_by and
+            // max_by pick them.
+            Acc::Min(m) => {
+                if m.as_ref().map(|c| v.total_cmp(c) == std::cmp::Ordering::Less).unwrap_or(true) {
+                    *m = Some(v);
+                }
+            }
+            Acc::Max(m) => {
+                if m.as_ref().map(|c| v.total_cmp(c) != std::cmp::Ordering::Less).unwrap_or(true) {
+                    *m = Some(v);
+                }
+            }
+            Acc::Collect(l) => l.push(v),
+            Acc::Count(_) | Acc::Other => {}
+        }
+    }
+
+    fn value(self) -> Value {
+        match self {
+            Acc::Count(n) => Value::Int(n),
+            Acc::Sum(s) => Value::Float(s),
+            Acc::Avg(s, n) => {
+                if n == 0 {
+                    Value::Null
+                } else {
+                    Value::Float(s / n as f64)
+                }
+            }
+            Acc::Min(m) | Acc::Max(m) => m.unwrap_or(Value::Null),
+            Acc::Collect(l) => Value::List(l),
+            Acc::Other => Value::Null,
+        }
+    }
+}
+
+/// RETURN, fed one match at a time. Holds only what the output needs: the
+/// groups of an aggregate, the top rows of an ORDER BY ... LIMIT, the rows
+/// seen so far of a LIMIT (and stops the match once it has enough).
+struct Projection<'q> {
+    kind: &'q ReturnKind,
+    distinct: bool,
+    order: &'q [(Expr, bool)],
+    skip: usize,
+    limit: Option<usize>,
+    items: Option<Vec<(Expr, String)>>,
+    keys: Vec<(usize, bool)>,
+    has_agg: bool,
+    rows: Vec<Vec<Value>>,
+    seen: FirstSeen,
+    groups: Vec<(Vec<Value>, Vec<Acc>)>,
+    group_index: FirstSeen,
+    group_keys: Vec<Vec<Value>>,
+    /// Rows produced before SKIP/LIMIT (after DISTINCT).
+    total: usize,
+}
+
+impl<'q> Projection<'q> {
+    fn new(
+        kind: &'q ReturnKind,
+        distinct: bool,
+        order: &'q [(Expr, bool)],
+        skip: usize,
+        limit: Option<usize>,
+    ) -> Projection<'q> {
+        Projection {
+            kind,
+            distinct,
+            order,
+            skip,
+            limit,
+            items: None,
+            keys: Vec::new(),
+            has_agg: false,
+            rows: Vec::new(),
+            seen: FirstSeen::default(),
+            groups: Vec::new(),
+            group_index: FirstSeen::default(),
+            group_keys: Vec::new(),
+            total: 0,
+        }
+    }
+
+    /// Resolve the items (RETURN * takes the first row's variables) and the
+    /// ORDER BY columns.
+    fn resolve(&mut self, first: Option<&Binds>) -> Result<()> {
+        if self.items.is_some() {
+            return Ok(());
+        }
+        let items: Vec<(Expr, String)> = match self.kind {
+            ReturnKind::Items(items) => items.clone(),
+            ReturnKind::All => first
+                .map(|b| b.iter().map(|(k, _)| (Expr::Var(k.to_string()), k.to_string())).collect())
+                .unwrap_or_default(),
+        };
+        let columns: Vec<String> = items.iter().map(|(_, a)| a.clone()).collect();
+        self.keys = self
+            .order
             .iter()
             .map(|(e, desc)| {
                 let alias = e.alias();
@@ -1988,71 +2685,133 @@ fn project(
                 Ok((idx, *desc))
             })
             .collect::<Result<Vec<_>>>()?;
-        out_rows.sort_by(|a, b| {
-            for (idx, desc) in &keys {
-                let ord = a[*idx].total_cmp(&b[*idx]);
-                let ord = if *desc { ord.reverse() } else { ord };
-                if ord != std::cmp::Ordering::Equal {
-                    return ord;
-                }
+        self.has_agg = items.iter().any(|(e, _)| e.is_aggregate());
+        self.items = Some(items);
+        Ok(())
+    }
+
+    fn cmp_rows(keys: &[(usize, bool)], a: &[Value], b: &[Value]) -> std::cmp::Ordering {
+        for (idx, desc) in keys {
+            let ord = a[*idx].total_cmp(&b[*idx]);
+            let ord = if *desc { ord.reverse() } else { ord };
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
             }
-            std::cmp::Ordering::Equal
-        });
+        }
+        std::cmp::Ordering::Equal
     }
 
-    let total = out_rows.len();
-    let mut final_rows: Vec<Vec<Value>> = out_rows.into_iter().skip(skip).collect();
-    if let Some(l) = limit {
-        final_rows.truncate(l);
-    }
-
-    Ok(QueryResult {
-        columns,
-        rows: final_rows,
-        message: None,
-        touched: total,
-    })
-}
-
-fn eval_aggregate(g: &Graph, e: &Expr, members: &[Binds]) -> Value {
-    let Expr::Func(name, args) = e else {
-        return Value::Null;
-    };
-    let arg = args.first();
-    let star = matches!(arg, Some(Expr::Lit(Value::Text(s))) if s == "*");
-    let values: Vec<Value> = if star {
-        members.iter().map(|_| Value::Int(1)).collect()
-    } else {
-        match arg {
-            Some(a) => members
+    /// Take one match. Returns false once no more are needed.
+    fn push(&mut self, g: &Graph, binds: Binds) -> Result<bool> {
+        self.resolve(Some(&binds))?;
+        let items = self.items.as_ref().expect("resolved");
+        if self.has_agg {
+            let key: Vec<Value> = items
                 .iter()
-                .map(|b| eval(g, a, b))
-                .filter(|v| !matches!(v, Value::Null))
-                .collect(),
-            None => Vec::new(),
+                .filter(|(e, _)| !e.is_aggregate())
+                .map(|(e, _)| eval(g, e, &binds))
+                .collect();
+            let idx = self.groups.len();
+            let gi = match self.group_index.find_or_add(&self.group_keys, &key, idx) {
+                Some(i) => i,
+                None => {
+                    let accs = items
+                        .iter()
+                        .filter(|(e, _)| e.is_aggregate())
+                        .map(|(e, _)| Acc::new(e))
+                        .collect();
+                    self.group_keys.push(key.clone());
+                    self.groups.push((key, accs));
+                    idx
+                }
+            };
+            let aggs = items.iter().filter(|(e, _)| e.is_aggregate()).map(|(e, _)| e);
+            for (acc, e) in self.groups[gi].1.iter_mut().zip(aggs) {
+                acc.add(g, e, &binds);
+            }
+            return Ok(true);
         }
-    };
-    match name.as_str() {
-        "count" => Value::Int(values.len() as i64),
-        "sum" => Value::Float(values.iter().filter_map(|v| v.as_f64()).sum()),
-        "avg" => {
-            let nums: Vec<f64> = values.iter().filter_map(|v| v.as_f64()).collect();
-            if nums.is_empty() {
-                Value::Null
-            } else {
-                Value::Float(nums.iter().sum::<f64>() / nums.len() as f64)
+        let row: Vec<Value> = items.iter().map(|(e, _)| eval(g, e, &binds)).collect();
+        if self.distinct {
+            let idx = self.rows.len();
+            if self.seen.find_or_add(&self.rows, &row, idx).is_some() {
+                return Ok(true);
             }
         }
-        "min" => values
-            .into_iter()
-            .min_by(|a, b| a.total_cmp(b))
-            .unwrap_or(Value::Null),
-        "max" => values
-            .into_iter()
-            .max_by(|a, b| a.total_cmp(b))
-            .unwrap_or(Value::Null),
-        "collect" => Value::List(values),
-        _ => Value::Null,
+        self.total += 1;
+        self.rows.push(row);
+        let Some(limit) = self.limit else {
+            return Ok(true);
+        };
+        let want = self.skip.saturating_add(limit);
+        if self.keys.is_empty() {
+            // No order: the first rows are the answer.
+            return Ok(self.rows.len() < want);
+        }
+        if !self.distinct && self.rows.len() >= want.saturating_mul(2).max(want + 1024) {
+            // Keep only the best `want`; a stable sort keeps ties in arrival
+            // order, as sorting everything at the end would.
+            let keys = self.keys.clone();
+            self.rows.sort_by(|a, b| Self::cmp_rows(&keys, a, b));
+            self.rows.truncate(want);
+        }
+        Ok(true)
+    }
+
+    fn finish(mut self) -> Result<QueryResult> {
+        self.resolve(None)?;
+        let items = self.items.take().expect("resolved");
+        let columns: Vec<String> = items.iter().map(|(_, a)| a.clone()).collect();
+        let mut out_rows: Vec<Vec<Value>> = if self.has_agg {
+            let rows: Vec<Vec<Value>> = std::mem::take(&mut self.groups)
+                .into_iter()
+                .map(|(key, accs)| {
+                    let mut key = key.into_iter();
+                    let mut accs = accs.into_iter();
+                    items
+                        .iter()
+                        .map(|(e, _)| {
+                            if e.is_aggregate() {
+                                accs.next().map(Acc::value).unwrap_or(Value::Null)
+                            } else {
+                                key.next().unwrap_or(Value::Null)
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            let rows = if self.distinct {
+                let mut seen = FirstSeen::default();
+                let mut kept: Vec<Vec<Value>> = Vec::new();
+                for r in rows {
+                    let idx = kept.len();
+                    if seen.find_or_add(&kept, &r, idx).is_none() {
+                        kept.push(r);
+                    }
+                }
+                kept
+            } else {
+                rows
+            };
+            self.total = rows.len();
+            rows
+        } else {
+            std::mem::take(&mut self.rows)
+        };
+        if !self.keys.is_empty() {
+            let keys = self.keys.clone();
+            out_rows.sort_by(|a, b| Self::cmp_rows(&keys, a, b));
+        }
+        let mut final_rows: Vec<Vec<Value>> = out_rows.into_iter().skip(self.skip).collect();
+        if let Some(l) = self.limit {
+            final_rows.truncate(l);
+        }
+        Ok(QueryResult {
+            columns,
+            rows: final_rows,
+            message: None,
+            touched: self.total,
+        })
     }
 }
 
@@ -2068,8 +2827,8 @@ fn eval(g: &Graph, e: &Expr, binds: &Binds) -> Value {
             None => Value::Null,
         },
         Expr::Prop(var, key) => match lookup(binds, var) {
-            Some(Bind::Node(id)) => g.node_prop(id, key).cloned().unwrap_or(Value::Null),
-            Some(Bind::Edge(id)) => g.edge_prop(id, key).cloned().unwrap_or(Value::Null),
+            Some(Bind::Node(id)) => g.node_prop(id, key).unwrap_or(Value::Null),
+            Some(Bind::Edge(id)) => g.edge_prop(id, key).unwrap_or(Value::Null),
             None => Value::Null,
         },
         Expr::Not(inner) => Value::Bool(!eval(g, inner, binds).truthy()),
@@ -2271,6 +3030,71 @@ impl<'a> Args<'a> {
 }
 
 fn call_algorithm(g: &mut Graph, name: &str, args: &[(String, Value)]) -> Result<QueryResult> {
+    // Algorithms hold their state within the graph's algorithm memory and
+    // spill past it; the projection itself is in memory only when it fits.
+    let budget = g.algorithm_memory();
+    let tmp = g.temp_dir();
+    let r = crate::ooc::with_budget(budget, tmp, || run_algorithm(g, name, args));
+    if r.is_ok() {
+        if let Some(e) = g.integrity_error() {
+            return Err(Error::Msg(format!("storage error during algorithm: {e}")));
+        }
+    }
+    r
+}
+
+/// Per-node results, streamed: written back when `write:` is given, and the
+/// top rows (all of them without `top:`) returned, highest first.
+fn scalar_rows(
+    g: &mut Graph,
+    mut ids: StateVec<u64>,
+    value: &mut dyn FnMut(usize) -> f64,
+    col: &str,
+    a: &Args,
+    integral: bool,
+) -> Result<QueryResult> {
+    let as_value = |v: f64| {
+        if integral {
+            Value::Int(v as i64)
+        } else {
+            Value::Float(v)
+        }
+    };
+    let n = ids.len();
+    let write = a.str("write");
+    let top = a.top();
+    // Best first: higher value, then lower id.
+    let better = |x: &(u64, f64), y: &(u64, f64)| y.1.total_cmp(&x.1).then_with(|| x.0.cmp(&y.0));
+    let mut keep: Vec<(u64, f64)> = Vec::new();
+    for i in 0..n {
+        let id = ids.get(i);
+        let v = value(i);
+        if let Some(prop) = &write {
+            g.set_node_prop(id, prop, as_value(v))?;
+        }
+        if top == 0 {
+            continue;
+        }
+        keep.push((id, v));
+        // Bounded top-k: compact once the buffer is twice the limit.
+        if top != usize::MAX && keep.len() >= top.saturating_mul(2).max(1024) {
+            keep.sort_by(better);
+            keep.truncate(top);
+        }
+    }
+    keep.sort_by(better);
+    keep.truncate(top);
+    let rows: Vec<Vec<Value>> = keep
+        .into_iter()
+        .map(|(id, v)| vec![Value::Int(id as i64), label_of(g, id), as_value(v)])
+        .collect();
+    Ok(QueryResult::table(
+        vec!["id".into(), "node".into(), col.into()],
+        rows,
+    ))
+}
+
+fn run_algorithm(g: &mut Graph, name: &str, args: &[(String, Value)]) -> Result<QueryResult> {
     let a = Args(args);
     let name = name.to_lowercase();
     let dir = match a.str("dir") {
@@ -2285,154 +3109,113 @@ fn call_algorithm(g: &mut Graph, name: &str, args: &[(String, Value)]) -> Result
         },
         None => None,
     };
-    let weight = a.str("weight");
-    let csr = g.csr(dir, etype, weight.as_deref());
-
-    let scalar = |g: &mut Graph,
-                  values: Vec<f64>,
-                  col: &str,
-                  a: &Args,
-                  integral: bool|
-     -> Result<QueryResult> {
-        let mut pairs: Vec<(u64, f64)> = csr
-            .ids
-            .iter()
-            .copied()
-            .zip(values.iter().copied())
-            .collect();
-        if let Some(prop) = a.str("write") {
-            for (id, v) in &pairs {
-                let value = if integral {
-                    Value::Int(*v as i64)
-                } else {
-                    Value::Float(*v)
-                };
-                g.set_node_prop(*id, &prop, value)?;
-            }
-            g.commit()?;
-        }
-        pairs.sort_by(|x, y| y.1.total_cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
-        let top = a.top();
-        let rows: Vec<Vec<Value>> = pairs
-            .into_iter()
-            .take(top)
-            .map(|(id, v)| {
-                vec![
-                    Value::Int(id as i64),
-                    label_of(g, id),
-                    if integral {
-                        Value::Int(v as i64)
-                    } else {
-                        Value::Float(v)
-                    },
-                ]
-            })
-            .collect();
-        Ok(QueryResult::table(
-            vec!["id".into(), "node".into(), col.into()],
-            rows,
-        ))
+    let tier = match a.str("tier") {
+        Some(t) => Tier::parse(&t).ok_or_else(|| Error::Msg(format!("bad tier '{t}': use mem, ooc or auto")))?,
+        None => Tier::Auto,
     };
+    let weight = a.str("weight");
+    fn proj<'g>(g: &'g Graph, d: Dir, etype: Option<u32>, w: Option<&str>, tier: Tier) -> AlgoView<'g> {
+        g.projection(d, etype, w, tier)
+    }
+    macro_rules! proj {
+        ($d:expr, $w:expr) => {
+            proj(g, $d, etype, $w, tier)
+        };
+    }
 
     match name.as_str() {
         "pagerank" => {
-            let pr = algo::pagerank(
-                &csr,
+            let p = proj!(dir, weight.as_deref());
+            let note = if p.is_paged() { " (out of core)" } else { "" };
+            let mut pr = algo::pagerank(
+                &p,
                 a.f64("damping", 0.85),
                 a.u32("iterations", 20),
                 a.f64("tolerance", 1e-6),
             );
-            let mut r = scalar(g, pr.scores, "score", &a, false)?;
+            let ids = p.into_ids();
+            let mut r = scalar_rows(g, ids, &mut |i| pr.scores.get(i), "score", &a, false)?;
             r.message = Some(format!(
-                "converged after {} iterations (delta {:.3e})",
+                "converged after {} iterations (delta {:.3e}){note}",
                 pr.iterations, pr.delta
             ));
             Ok(r)
         }
         "betweenness" => {
+            let p = proj!(dir, weight.as_deref());
+            let n = p.len();
             let samples = a.u32("samples", 0) as usize;
-            let sources: Option<Vec<usize>> = if samples > 0 && samples < csr.len() {
-                let step = (csr.len() / samples).max(1);
-                Some((0..csr.len()).step_by(step).collect())
+            let sources: Option<Vec<usize>> = if samples > 0 && samples < n {
+                let step = (n / samples).max(1);
+                Some((0..n).step_by(step).collect())
             } else {
                 None
             };
-            let scores = algo::betweenness(&csr, sources.as_deref(), a.bool("normalize", true));
-            scalar(g, scores, "betweenness", &a, false)
+            let mut scores = {
+                let rev = p.reversed();
+                algo::betweenness_with(&p, &rev, sources.as_deref(), a.bool("normalize", true))
+            };
+            let ids = p.into_ids();
+            scalar_rows(g, ids, &mut |i| scores.get(i), "betweenness", &a, false)
         }
         "closeness" => {
-            let scores = algo::closeness(&csr, weight.is_some());
-            scalar(g, scores, "closeness", &a, false)
+            let p = proj!(dir, weight.as_deref());
+            let mut scores = algo::closeness(&p, weight.is_some());
+            let ids = p.into_ids();
+            scalar_rows(g, ids, &mut |i| scores.get(i), "closeness", &a, false)
         }
         "degree" => {
-            let scores: Vec<f64> = (0..csr.len()).map(|v| csr.degree(v) as f64).collect();
-            scalar(g, scores, "degree", &a, true)
+            let p = proj!(dir, weight.as_deref());
+            let mut deg = StateVec::new(p.len(), 0u64);
+            for v in 0..p.len() {
+                deg.set(v, p.degree(v) as u64);
+            }
+            let ids = p.into_ids();
+            scalar_rows(g, ids, &mut |i| deg.get(i) as f64, "degree", &a, true)
         }
         "triangles" => {
-            let both = g.csr(Dir::Both, etype, None);
-            let (counts, total) = algo::triangles(&both);
-            let mut r = scalar(
-                g,
-                counts.iter().map(|c| *c as f64).collect(),
-                "triangles",
-                &a,
-                true,
-            )?;
+            let p = proj!(Dir::Both, None);
+            let (mut counts, total) = algo::triangles(&p);
+            let ids = p.into_ids();
+            let mut r = scalar_rows(g, ids, &mut |i| counts.get(i) as f64, "triangles", &a, true)?;
             r.message = Some(format!("{} triangles in total", total));
             Ok(r)
         }
         "clustering" => {
-            let both = g.csr(Dir::Both, etype, None);
-            let (counts, _) = algo::triangles(&both);
-            let coeffs = algo::clustering(&both, &counts);
-            scalar(g, coeffs, "clustering", &a, false)
+            let p = proj!(Dir::Both, None);
+            let (mut counts, _) = algo::triangles(&p);
+            let mut coeffs = algo::clustering(&p, &mut counts);
+            drop(counts);
+            let ids = p.into_ids();
+            scalar_rows(g, ids, &mut |i| coeffs.get(i), "clustering", &a, false)
         }
         "kcore" => {
-            let both = g.csr(Dir::Both, etype, None);
-            let cores = algo::core_numbers(&both);
-            scalar(
-                g,
-                cores.iter().map(|c| *c as f64).collect(),
-                "core",
-                &a,
-                true,
-            )
+            let p = proj!(Dir::Both, None);
+            let mut cores = algo::core_numbers(&p);
+            let ids = p.into_ids();
+            scalar_rows(g, ids, &mut |i| cores.get(i) as f64, "core", &a, true)
         }
         "components" | "wcc" => {
-            let both = g.csr(Dir::Both, etype, None);
-            let (comp, count) = algo::components(&both);
-            let mut r = scalar(
-                g,
-                comp.iter().map(|c| *c as f64).collect(),
-                "component",
-                &a,
-                true,
-            )?;
+            let p = proj!(Dir::Both, None);
+            let (mut comp, count) = algo::components(&p);
+            let ids = p.into_ids();
+            let mut r = scalar_rows(g, ids, &mut |i| comp.get(i) as f64, "component", &a, true)?;
             r.message = Some(format!("{} connected components", count));
             Ok(r)
         }
         "scc" => {
-            let (comp, count) = algo::strongly_connected(&csr);
-            let mut r = scalar(
-                g,
-                comp.iter().map(|c| *c as f64).collect(),
-                "component",
-                &a,
-                true,
-            )?;
+            let p = proj!(dir, weight.as_deref());
+            let (mut comp, count) = algo::strongly_connected(&p);
+            let ids = p.into_ids();
+            let mut r = scalar_rows(g, ids, &mut |i| comp.get(i) as f64, "component", &a, true)?;
             r.message = Some(format!("{} strongly connected components", count));
             Ok(r)
         }
         "communities" | "labelprop" => {
-            let both = g.csr(Dir::Both, etype, None);
-            let (labels, count) = algo::label_propagation(&both, a.u32("iterations", 20));
-            let mut r = scalar(
-                g,
-                labels.iter().map(|l| *l as f64).collect(),
-                "community",
-                &a,
-                true,
-            )?;
+            let p = proj!(Dir::Both, None);
+            let (mut labels, count) = algo::label_propagation(&p, a.u32("iterations", 20));
+            let ids = p.into_ids();
+            let mut r = scalar_rows(g, ids, &mut |i| labels.get(i) as f64, "community", &a, true)?;
             r.message = Some(format!("{} communities", count));
             Ok(r)
         }
@@ -2443,18 +3226,43 @@ fn call_algorithm(g: &mut Graph, name: &str, args: &[(String, Value)]) -> Result
             let to = a
                 .u64("to")
                 .ok_or_else(|| Error::Msg("shortestpath needs to:".into()))?;
-            let (Some(s), Some(t)) = (csr.index_of(from), csr.index_of(to)) else {
+            // Unweighted: search from both ends over the adjacency, touching
+            // only what the search reaches. Weighted, or past the memory
+            // budget, falls through to the whole-graph algorithm.
+            if weight.is_none() && tier == Tier::Auto {
+                if g.node(from).is_none() || g.node(to).is_none() {
+                    return Err(Error::Msg("from/to must be existing node ids".into()));
+                }
+                if let Some(found) = crate::traverse::shortest_path(g, from, to, dir, etype, walk_cap(g)) {
+                    return Ok(match found {
+                        None => QueryResult::message("no path"),
+                        Some(path) => {
+                            let hops = path.len() - 1;
+                            let rows = path
+                                .into_iter()
+                                .enumerate()
+                                .map(|(i, id)| vec![Value::Int(i as i64), Value::Int(id as i64), label_of(g, id)])
+                                .collect();
+                            let mut r = QueryResult::table(vec!["step".into(), "id".into(), "node".into()], rows);
+                            r.message = Some(format!("{hops} hops, cost {hops}"));
+                            r
+                        }
+                    });
+                }
+            }
+            let p = proj!(dir, weight.as_deref());
+            let (Some(s), Some(t)) = (p.index_of(from), p.index_of(to)) else {
                 return Err(Error::Msg("from/to must be existing node ids".into()));
             };
-            if weight.is_some() && algo::has_negative_weights(&csr) {
+            if weight.is_some() && algo::has_negative_weights(&p) {
                 return Err(Error::Msg(
                     "negative edge weights are not supported by dijkstra".into(),
                 ));
             }
-            let paths = if weight.is_some() {
-                algo::dijkstra(&csr, s)
+            let mut paths = if weight.is_some() {
+                algo::dijkstra(&p, s)
             } else {
-                algo::bfs_paths(&csr, s)
+                algo::bfs_paths(&p, s)
             };
             match paths.path_to(t) {
                 None => Ok(QueryResult::message("no path")),
@@ -2462,8 +3270,8 @@ fn call_algorithm(g: &mut Graph, name: &str, args: &[(String, Value)]) -> Result
                     let rows: Vec<Vec<Value>> = path
                         .iter()
                         .enumerate()
-                        .map(|(i, p)| {
-                            let id = csr.ids[*p];
+                        .map(|(i, v)| {
+                            let id = p.id(*v);
                             vec![Value::Int(i as i64), Value::Int(id as i64), label_of(g, id)]
                         })
                         .collect();
@@ -2472,7 +3280,7 @@ fn call_algorithm(g: &mut Graph, name: &str, args: &[(String, Value)]) -> Result
                     r.message = Some(format!(
                         "{} hops, cost {}",
                         path.len().saturating_sub(1),
-                        paths.dist[t]
+                        paths.dist.get(t)
                     ));
                     Ok(r)
                 }
@@ -2482,31 +3290,45 @@ fn call_algorithm(g: &mut Graph, name: &str, args: &[(String, Value)]) -> Result
             let from = a
                 .u64("from")
                 .ok_or_else(|| Error::Msg("sssp needs from:".into()))?;
-            let s = csr
+            let p = proj!(dir, weight.as_deref());
+            let s = p
                 .index_of(from)
                 .ok_or_else(|| Error::Msg("from: must be an existing node id".into()))?;
             let paths = if weight.is_some() {
-                algo::dijkstra(&csr, s)
+                algo::dijkstra(&p, s)
             } else {
-                algo::bfs_paths(&csr, s)
+                algo::bfs_paths(&p, s)
             };
-            let mut pairs: Vec<(u64, f64)> = csr
-                .ids
-                .iter()
-                .copied()
-                .zip(paths.dist.iter().copied())
-                .filter(|(_, d)| d.is_finite())
-                .collect();
-            pairs.sort_by(|x, y| x.1.total_cmp(&y.1).then_with(|| x.0.cmp(&y.0)));
-            if let Some(prop) = a.str("write") {
-                for (id, d) in &pairs {
-                    g.set_node_prop(*id, &prop, Value::Float(*d))?;
+            let mut dist = paths.dist;
+            drop(paths.parent);
+            let mut ids = p.into_ids();
+            let write = a.str("write");
+            let top = a.top();
+            // Nearest first: lower distance, then lower id.
+            let better = |x: &(u64, f64), y: &(u64, f64)| x.1.total_cmp(&y.1).then_with(|| x.0.cmp(&y.0));
+            let mut keep: Vec<(u64, f64)> = Vec::new();
+            for i in 0..ids.len() {
+                let d = dist.get(i);
+                if !d.is_finite() {
+                    continue;
                 }
-                g.commit()?;
+                let id = ids.get(i);
+                if let Some(prop) = &write {
+                    g.set_node_prop(id, prop, Value::Float(d))?;
+                }
+                if top == 0 {
+                    continue;
+                }
+                keep.push((id, d));
+                if top != usize::MAX && keep.len() >= top.saturating_mul(2).max(1024) {
+                    keep.sort_by(better);
+                    keep.truncate(top);
+                }
             }
-            let rows = pairs
+            keep.sort_by(better);
+            keep.truncate(top);
+            let rows = keep
                 .into_iter()
-                .take(a.top())
                 .map(|(id, d)| vec![Value::Int(id as i64), label_of(g, id), Value::Float(d)])
                 .collect();
             Ok(QueryResult::table(
@@ -2518,26 +3340,42 @@ fn call_algorithm(g: &mut Graph, name: &str, args: &[(String, Value)]) -> Result
             let from = a
                 .u64("from")
                 .ok_or_else(|| Error::Msg("traversal needs from:".into()))?;
-            let s = csr
+            if tier == Tier::Auto {
+                if let Some(r) = local_walk(g, &name, from, dir, etype, &a)? {
+                    return Ok(r);
+                }
+            }
+            let p = proj!(dir, weight.as_deref());
+            let s = p
                 .index_of(from)
                 .ok_or_else(|| Error::Msg("from: must be an existing node id".into()))?;
             let depth = a.get("depth").and_then(|v| v.as_i64()).map(|v| v as u32);
-            let visits = if name == "bfs" {
-                algo::bfs(&csr, s, depth)
-            } else {
-                algo::dfs(&csr, s, depth)
+            // Stop the walk once `top` visits are in hand.
+            let top = a.top();
+            let mut visits = Vec::new();
+            let mut keep = |v: algo::Visit| {
+                if visits.len() < top {
+                    visits.push(v);
+                }
+                visits.len() < top
             };
+            if top > 0 {
+                if name == "bfs" {
+                    algo::bfs_each(&p, s, depth, &mut keep);
+                } else {
+                    algo::dfs_each(&p, s, depth, &mut keep);
+                }
+            }
             let rows = visits
                 .into_iter()
-                .take(a.top())
                 .map(|v| {
-                    let id = csr.ids[v.node];
+                    let id = p.id(v.node);
                     vec![
                         Value::Int(id as i64),
                         label_of(g, id),
                         Value::Int(v.depth as i64),
                         v.parent
-                            .map(|p| Value::Int(csr.ids[p] as i64))
+                            .map(|q| Value::Int(p.id(q) as i64))
                             .unwrap_or(Value::Null),
                     ]
                 })
@@ -2552,15 +3390,7 @@ fn call_algorithm(g: &mut Graph, name: &str, args: &[(String, Value)]) -> Result
                 .u64("from")
                 .ok_or_else(|| Error::Msg("neighbors needs from:".into()))?;
             let rows: Vec<Vec<Value>> = g
-                .neighbors(
-                    from,
-                    dir,
-                    if etype == Some(u32::MAX) {
-                        etype
-                    } else {
-                        etype
-                    },
-                )
+                .neighbors(from, dir, etype)
                 .into_iter()
                 .take(a.top())
                 .map(|adj| {
@@ -2581,15 +3411,35 @@ fn call_algorithm(g: &mut Graph, name: &str, args: &[(String, Value)]) -> Result
             let from = a
                 .u64("from")
                 .ok_or_else(|| Error::Msg("subgraph needs from:".into()))?;
-            let s = csr
+            let depth = a.u32("depth", 2);
+            if g.node(from).is_none() {
+                return Err(Error::Msg("from: must be an existing node id".into()));
+            }
+            let top = a.top();
+            let mut rows = Vec::new();
+            let cap = if tier == Tier::Auto { walk_cap(g) } else { 0 };
+            let done = crate::traverse::bfs(g, from, dir, etype, Some(depth), cap, &mut |v| {
+                if v.depth > 0 {
+                    if rows.len() >= top {
+                        return false;
+                    }
+                    rows.push(vec![Value::Int(v.node as i64), label_of(g, v.node), Value::Int(v.depth as i64)]);
+                }
+                true
+            });
+            if done.is_some() {
+                return Ok(QueryResult::table(vec!["id".into(), "node".into(), "depth".into()], rows));
+            }
+            let p = proj!(dir, weight.as_deref());
+            let s = p
                 .index_of(from)
                 .ok_or_else(|| Error::Msg("from: must be an existing node id".into()))?;
-            let reach = algo::k_hop(&csr, s, a.u32("depth", 2));
+            let reach = algo::k_hop(&p, s, a.u32("depth", 2));
             let rows = reach
                 .into_iter()
                 .take(a.top())
                 .map(|(v, d)| {
-                    let id = csr.ids[v];
+                    let id = p.id(v);
                     vec![Value::Int(id as i64), label_of(g, id), Value::Int(d as i64)]
                 })
                 .collect();
@@ -2598,44 +3448,49 @@ fn call_algorithm(g: &mut Graph, name: &str, args: &[(String, Value)]) -> Result
                 rows,
             ))
         }
-        "toposort" | "topo" => match algo::topological_sort(&csr) {
-            None => Err(Error::Msg("graph has a cycle: no topological order".into())),
-            Some(order) => {
-                let rows = order
-                    .into_iter()
-                    .enumerate()
-                    .take(a.top())
-                    .map(|(i, v)| {
-                        let id = csr.ids[v];
-                        vec![Value::Int(i as i64), Value::Int(id as i64), label_of(g, id)]
-                    })
-                    .collect();
-                Ok(QueryResult::table(
-                    vec!["position".into(), "id".into(), "node".into()],
-                    rows,
-                ))
+        "toposort" | "topo" => {
+            let p = proj!(dir, weight.as_deref());
+            match algo::topological_sort(&p) {
+                None => Err(Error::Msg("graph has a cycle: no topological order".into())),
+                Some(mut order) => {
+                    let rows = (0..order.len())
+                        .take(a.top())
+                        .map(|i| {
+                            let id = p.id(order.get(i) as usize);
+                            vec![Value::Int(i as i64), Value::Int(id as i64), label_of(g, id)]
+                        })
+                        .collect();
+                    Ok(QueryResult::table(
+                        vec!["position".into(), "id".into(), "node".into()],
+                        rows,
+                    ))
+                }
             }
-        },
-        "cycle" | "cycles" => match algo::find_cycle(&csr) {
-            None => Ok(QueryResult::message("no cycle found")),
-            Some(cycle) => {
-                let rows = cycle
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        let id = csr.ids[v];
-                        vec![Value::Int(i as i64), Value::Int(id as i64), label_of(g, id)]
-                    })
-                    .collect();
-                Ok(QueryResult::table(
-                    vec!["step".into(), "id".into(), "node".into()],
-                    rows,
-                ))
+        }
+        "cycle" | "cycles" => {
+            let p = proj!(dir, weight.as_deref());
+            match algo::find_cycle(&p) {
+                None => Ok(QueryResult::message("no cycle found")),
+                Some(cycle) => {
+                    let rows = cycle
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            let id = p.id(v);
+                            vec![Value::Int(i as i64), Value::Int(id as i64), label_of(g, id)]
+                        })
+                        .collect();
+                    Ok(QueryResult::table(
+                        vec!["step".into(), "id".into(), "node".into()],
+                        rows,
+                    ))
+                }
             }
-        },
+        }
         "mst" => {
-            let both = g.csr(Dir::Both, etype, weight.as_deref());
-            let (edges, total) = algo::minimum_spanning_forest(&both);
+            let p = proj!(Dir::Both, weight.as_deref());
+            let (edges, total) = algo::minimum_spanning_forest(&p);
+            drop(p);
             let rows: Vec<Vec<Value>> = edges
                 .iter()
                 .take(a.top())
@@ -2643,8 +3498,8 @@ fn call_algorithm(g: &mut Graph, name: &str, args: &[(String, Value)]) -> Result
                     let e = g.edge(*eid);
                     vec![
                         Value::Int(*eid as i64),
-                        Value::Int(e.map(|e| e.from as i64).unwrap_or(0)),
-                        Value::Int(e.map(|e| e.to as i64).unwrap_or(0)),
+                        Value::Int(e.as_ref().map(|e| e.from as i64).unwrap_or(0)),
+                        Value::Int(e.as_ref().map(|e| e.to as i64).unwrap_or(0)),
                         Value::Text(g.edge_type_name(*eid).unwrap_or("").to_string()),
                     ]
                 })
@@ -2663,6 +3518,49 @@ fn call_algorithm(g: &mut Graph, name: &str, args: &[(String, Value)]) -> Result
     }
 }
 
+/// How many nodes a local walk may remember before it gives way to the
+/// whole-graph algorithm, from the algorithm memory budget.
+fn walk_cap(g: &Graph) -> usize {
+    (g.algorithm_memory() / crate::traverse::BYTES_PER_NODE).max(1 << 16) as usize
+}
+
+/// BFS or DFS over the adjacency, keeping state only for what it visits.
+/// `None` when the walk outgrew its budget and the caller should use the
+/// whole-graph version.
+fn local_walk(g: &Graph, name: &str, from: u64, dir: Dir, etype: Option<u32>, a: &Args) -> Result<Option<QueryResult>> {
+    if g.node(from).is_none() {
+        return Err(Error::Msg("from: must be an existing node id".into()));
+    }
+    let depth = a.get("depth").and_then(|v| v.as_i64()).map(|v| v as u32);
+    let top = a.top();
+    let mut visits = Vec::new();
+    if top > 0 {
+        let mut keep = |v: crate::traverse::Visit| {
+            visits.push(v);
+            visits.len() < top
+        };
+        let walk = if name == "bfs" { crate::traverse::bfs } else { crate::traverse::dfs };
+        if walk(g, from, dir, etype, depth, walk_cap(g), &mut keep).is_none() {
+            return Ok(None);
+        }
+    }
+    let rows = visits
+        .into_iter()
+        .map(|v| {
+            vec![
+                Value::Int(v.node as i64),
+                label_of(g, v.node),
+                Value::Int(v.depth as i64),
+                v.parent.map(|q| Value::Int(q as i64)).unwrap_or(Value::Null),
+            ]
+        })
+        .collect();
+    Ok(Some(QueryResult::table(
+        vec!["id".into(), "node".into(), "depth".into(), "parent".into()],
+        rows,
+    )))
+}
+
 fn default_dir(name: &str) -> Dir {
     match name {
         "triangles" | "clustering" | "kcore" | "components" | "wcc" | "communities"
@@ -2676,7 +3574,7 @@ fn default_dir(name: &str) -> Dir {
 fn label_of(g: &Graph, id: u64) -> Value {
     for key in ["name", "title", "label", "key"] {
         if let Some(v) = g.node_prop(id, key) {
-            return v.clone();
+            return v;
         }
     }
     match g.node_labels(id).first() {
@@ -2763,46 +3661,80 @@ fn endpoint(j: &crate::value::Json, key: &str, map: &HashMap<String, u64>) -> Op
 }
 
 /// Dump the whole graph as JSON Lines, re-importable by `import_jsonl`.
+/// Holds the whole dump in memory; use [`export_jsonl_to`] for large graphs.
 pub fn export_jsonl(g: &Graph) -> String {
+    let mut out = Vec::new();
+    export_jsonl_to(g, &mut out).expect("writing to a Vec cannot fail");
+    String::from_utf8(out).expect("export writes UTF-8")
+}
+
+/// Stream the JSON Lines dump to `w`. Pages through node and edge ids, so
+/// memory stays flat however large the graph is.
+pub fn export_jsonl_to(g: &Graph, w: &mut impl std::io::Write) -> std::io::Result<()> {
+    const PAGE: usize = 4096;
     let mut out = String::new();
-    for id in g.node_ids() {
-        out.push_str("{\"type\":\"node\",\"id\":");
-        out.push_str(&id.to_string());
-        out.push_str(",\"labels\":[");
-        for (i, l) in g.node_labels(id).iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            write_json_string(l, &mut out);
+    let mut from = 0;
+    loop {
+        let ids = g.nodes_from(from, PAGE);
+        let Some(&last) = ids.last() else { break };
+        for id in ids {
+            write_node_line(g, id, &mut out);
         }
-        out.push_str("],\"props\":{");
-        for (i, (k, v)) in g.node_props(id).iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            write_json_string(k, &mut out);
-            out.push(':');
-            v.write_json(&mut out);
-        }
-        out.push_str("}}\n");
+        w.write_all(out.as_bytes())?;
+        out.clear();
+        from = last + 1;
     }
-    for id in g.edge_ids() {
-        let Some(e) = g.edge(id) else { continue };
-        out.push_str("{\"type\":\"edge\",\"id\":");
-        out.push_str(&id.to_string());
-        out.push_str(",\"label\":");
-        write_json_string(g.edge_type_name(id).unwrap_or(""), &mut out);
-        out.push_str(&format!(",\"from\":{},\"to\":{}", e.from, e.to));
-        out.push_str(",\"props\":{");
-        for (i, (k, v)) in g.edge_props(id).iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            write_json_string(k, &mut out);
-            out.push(':');
-            v.write_json(&mut out);
+    from = 0;
+    loop {
+        let ids = g.edges_from(from, PAGE);
+        let Some(&last) = ids.last() else { break };
+        for id in ids {
+            write_edge_line(g, id, &mut out);
         }
-        out.push_str("}}\n");
+        w.write_all(out.as_bytes())?;
+        out.clear();
+        from = last + 1;
     }
-    out
+    w.flush()
+}
+
+fn write_node_line(g: &Graph, id: u64, out: &mut String) {
+    out.push_str("{\"type\":\"node\",\"id\":");
+    out.push_str(&id.to_string());
+    out.push_str(",\"labels\":[");
+    for (i, l) in g.node_labels(id).iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        write_json_string(l, out);
+    }
+    out.push_str("],\"props\":{");
+    for (i, (k, v)) in g.node_props(id).iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        write_json_string(k, out);
+        out.push(':');
+        v.write_json(out);
+    }
+    out.push_str("}}\n");
+}
+
+fn write_edge_line(g: &Graph, id: u64, out: &mut String) {
+    let Some(e) = g.edge(id) else { return };
+    out.push_str("{\"type\":\"edge\",\"id\":");
+    out.push_str(&id.to_string());
+    out.push_str(",\"label\":");
+    write_json_string(g.edge_type_name(id).unwrap_or(""), out);
+    out.push_str(&format!(",\"from\":{},\"to\":{}", e.from, e.to));
+    out.push_str(",\"props\":{");
+    for (i, (k, v)) in g.edge_props(id).iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        write_json_string(k, out);
+        out.push(':');
+        v.write_json(out);
+    }
+    out.push_str("}}\n");
 }

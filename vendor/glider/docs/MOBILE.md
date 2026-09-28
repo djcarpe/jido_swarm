@@ -24,7 +24,7 @@ rules you obey.
 
 ## The C ABI
 
-Thirteen functions, SQLite-shaped: open, query, free, close. `src/ffi.rs` is
+A handful of functions, SQLite-shaped: open, query, free, close. `src/ffi.rs` is
 the whole layer — it catches panics at the boundary and converts them to
 errors, because unwinding across an FFI edge is undefined behaviour and a
 query parser bug should not crash someone's app.
@@ -96,9 +96,10 @@ try FileManager.default.setAttributes(
 **Suspension.** A backgrounded app gets SIGKILLed with no further callback.
 Under `GLIDER_SYNC_NORMAL` the last commits are in the OS page cache, which
 survives that — but not a reboot or a power loss. Call `glider_checkpoint` from
-`sceneDidEnterBackground`. Wrap `glider_compact` in
-`beginBackgroundTask`/`endBackgroundTask` so you are not suspended mid-rewrite.
-(Even if you are, compaction is crash-safe: temp file, fsync, atomic rename.)
+`sceneDidEnterBackground`; a checkpoint writes only the pages changed since
+the last one. Even if you are suspended mid-checkpoint nothing is lost: the
+superblock that names the new pages is written last, so a crash leaves the
+previous checkpoint plus the write-ahead log, which the next open replays.
 
 **Location.** Put the file in Application Support, not Documents, unless you
 want users deleting it in the Files app. Exclude it from iCloud backup
@@ -143,43 +144,51 @@ passes `-Wl,-z,max-page-size=16384` already; if you build by hand, don't drop it
 ## Windows
 
 `cargo build --release --target x86_64-pc-windows-msvc` and you have
-`glider.exe` plus `glider.dll`. Nothing in the engine is Unix-specific. Two
-details already handled in `store.rs`:
-
-- Rust opens files with `FILE_SHARE_DELETE`, so compaction's rename-over-the-
-  open-file works — but the old handle is stale afterwards, so the store
-  reopens the file immediately after the rename.
-- A virus scanner or the search indexer can hold a transient handle and make
-  the rename fail with `ACCESS_DENIED` for a few milliseconds. The rename
-  retries with backoff instead of failing the compaction.
+`glider.exe` plus `glider.dll`. Nothing in the engine is Unix-specific: pages
+are read and written with positional I/O (`seek_read`/`seek_write` on
+Windows), and the database is never renamed over while open. (Converting a
+pre-paged file with `glider <db> migrate` does rename, and retries with
+backoff when a virus scanner holds a transient handle.)
 
 ## Browser / React Native
 
-`wasm32-unknown-unknown` compiles, with no filesystem — use `Graph::memory()`
-and `import_jsonl`/`export_jsonl` to move state in and out, persisting the dump
-wherever the host keeps data. `wasm32-wasip1` gets you real file I/O under a
-WASI runtime. Neither is wired up with bindings yet; the FFI layer is the model
-to copy.
+`wasm32-unknown-unknown` compiles, with no filesystem: graphs are `:memory:`
+page stores, and `import_jsonl`/`export_jsonl` move state in and out, to be
+persisted wherever the host keeps data. `Graph::from_bytes` loads the pages of
+a database file (as of its last checkpoint) into memory. `wasm32-wasip1` gets
+you real file I/O under a WASI runtime. The TypeScript bindings in `ts/`
+wrap the wasm build.
 
-## The constraint that actually matters on mobile
+## Memory on a phone
 
-The whole graph lives in RAM while open. That is the design — it is what makes
-the algorithms fast — but on a phone it is a budget, not an afterthought.
-Roughly: a node costs ~120 bytes plus its properties, an edge ~80. A million
-nodes and four million edges lands near 450 MB, which Android will kill you
-for. Practical ceilings:
+Storage is paged, as in SQLite: the database lives in the file and RAM holds
+a page cache of a size you choose, however large the graph grows. Opening
+reads a superblock, so it takes milliseconds at any size.
 
-| Device budget | Comfortable graph |
-|---|---|
-| Android, low-end (~100 MB) | ~150k nodes / 600k edges |
-| iOS, foreground (~500 MB) | ~1M nodes / 4M edges |
-| Desktop | tens of millions of edges |
+```c
+glider_db *db = glider_open_ex(path, GLIDER_SYNC_NORMAL, 8 << 20); /* 8 MB cache */
+```
 
-If you need more on-device, the honest answer is that glider's storage model
-has to change — a paged B-tree with an LRU buffer pool instead of
-replay-into-memory. That is a real rewrite of `store.rs` and `graph.rs`, not a
-flag. Before doing it, check whether you can shard by subgraph and open one at
-a time, which is usually true for per-user or per-repo graphs.
+A smaller cache means more reads from flash for the same query; point
+lookups and short traversals stay in the low milliseconds even when almost
+nothing is cached. Algorithms (`CALL pagerank(...)` and the rest) work within
+the working memory and spill beyond it to temp files next to the database.
+
+Writes go to a write-ahead log and are folded into the pages by a checkpoint:
+automatically once the log passes 256 MiB (`glider_set_auto_compact` sets the
+threshold), on `glider_checkpoint`, and on close. Checkpointing inside a
+commit on the UI thread can stall it, so on mobile set a lower threshold and
+checkpoint from a background task when the app backgrounds.
+
+An in-memory graph can be capped, so a cache that grows too large fails
+cleanly instead of getting the app killed:
+
+```c
+glider_db *scratch = glider_open_memory_ex(64 << 20); /* at most 64 MB */
+```
+
+Past the cap, the write that would exceed it fails with an error and is
+rolled back; the graph stays usable, as SQLite does with `SQLITE_FULL`.
 
 Interning helps already: labels, edge types and property keys are stored once
 as `u32` ids, so a million nodes with the same schema pay for the schema once.

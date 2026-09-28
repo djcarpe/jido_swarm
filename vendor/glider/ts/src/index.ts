@@ -22,8 +22,11 @@
 import {
   GliderError,
   type Cell,
+  type EdgePage,
   type GliderNode,
   type GliderRel,
+  type NodePage,
+  type PageOptions,
   type QueryResult,
   type Schema,
 } from './types.js'
@@ -34,11 +37,14 @@ export * from './types.js'
 interface Exports {
   memory: WebAssembly.Memory
   glider_open_memory(): number
+  glider_open_bytes(bytes: number, len: number): number
   glider_close(db: number): void
   glider_query(db: number, q: number): number
   glider_query_json(db: number, q: number): number
   glider_schema_json(db: number): number
   glider_expand_json(db: number, id: bigint, limit: number): number
+  glider_nodes_json(db: number, label: number, q: number, from: bigint, limit: number): number
+  glider_edges_json(db: number, etype: number, q: number, from: bigint, limit: number): number
   glider_import_jsonl(db: number, jsonl: number): number
   glider_export_jsonl(db: number): number
   glider_stats(db: number): number
@@ -140,6 +146,33 @@ export class GliderModule {
     return new GliderDb(this, handle)
   }
 
+  /**
+   * Open a graph from the bytes of a `.gldb` database file — read with
+   * `File.arrayBuffer()`, `fetch`, or `fs.readFile`. The graph is in memory:
+   * edits are not written back to the file. Persist with `exportJsonl()`.
+   */
+  openBytes(bytes: ArrayBuffer | ArrayBufferView): GliderDb {
+    const src =
+      bytes instanceof ArrayBuffer
+        ? new Uint8Array(bytes)
+        : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    const len = src.byteLength
+    // Allocate at least one byte so an empty file still gets a real pointer;
+    // glider then reports it as too short, which is the useful error.
+    const cap = Math.max(len, 1)
+    const ptr = this.#e.glider_alloc(cap)
+    if (!ptr) throw new GliderError(`could not allocate ${len} bytes in wasm memory`)
+    let handle: number
+    try {
+      this.#bytes().set(src, ptr)
+      handle = this.#e.glider_open_bytes(ptr, len)
+    } finally {
+      this.#e.glider_dealloc(ptr, cap)
+    }
+    if (!handle) throw new GliderError(this.#lastError() ?? 'could not open that file')
+    return new GliderDb(this, handle)
+  }
+
   // ---- internals used by GliderDb ------------------------------------
 
   /** Bytes of linear memory. Re-read every time: growth detaches old views. */
@@ -192,6 +225,12 @@ export class GliderModule {
     } finally {
       this.#e.glider_dealloc(ptr, len)
     }
+  }
+
+  /** As `withCString`, but an absent string is passed as NULL. */
+  /** @internal */
+  withOptCString<T>(s: string | undefined, fn: (ptr: number) => T): T {
+    return s === undefined || s === '' ? fn(0) : this.withCString(s, fn)
   }
 
   /** @internal */
@@ -255,6 +294,37 @@ export class GliderDb {
     const json = this.mod.take(this.mod.raw.glider_expand_json(db, BigInt(id), limit))
     if (json === null) throw new GliderError(this.mod.lastError() ?? `could not expand node ${id}`)
     return (JSON.parse(json) as { graph: QueryResult['graph'] }).graph
+  }
+
+  /**
+   * A page of nodes, cursor-paged by id. Pass the previous page's `next` as
+   * `from` to continue; `q` matches labels, property values and the id.
+   */
+  nodes(opts: PageOptions = {}): NodePage {
+    const db = this.#alive()
+    const json = this.mod.withOptCString(opts.label, (lp) =>
+      this.mod.withOptCString(opts.q, (qp) =>
+        this.mod.take(
+          this.mod.raw.glider_nodes_json(db, lp, qp, BigInt(opts.from ?? 0), opts.limit ?? 50),
+        ),
+      ),
+    )
+    if (json === null) throw new GliderError(this.mod.lastError() ?? 'nodes failed')
+    return JSON.parse(json) as NodePage
+  }
+
+  /** A page of relationships with their endpoints. Same contract as `nodes`. */
+  edges(opts: PageOptions = {}): EdgePage {
+    const db = this.#alive()
+    const json = this.mod.withOptCString(opts.type, (tp) =>
+      this.mod.withOptCString(opts.q, (qp) =>
+        this.mod.take(
+          this.mod.raw.glider_edges_json(db, tp, qp, BigInt(opts.from ?? 0), opts.limit ?? 50),
+        ),
+      ),
+    )
+    if (json === null) throw new GliderError(this.mod.lastError() ?? 'edges failed')
+    return JSON.parse(json) as EdgePage
   }
 
   /** Bulk load JSON Lines. Returns the number of entities imported. */

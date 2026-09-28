@@ -133,9 +133,9 @@ impl<'a> Digraph<'a> {
 
     /// Strongly connected components, including the singletons.
     pub fn strong_components(&self) -> Vec<Vec<u64>> {
-        let (comp, count) = algo::strongly_connected(&self.out);
+        let (mut comp, count) = algo::strongly_connected(&self.out);
         let mut groups: Vec<Vec<usize>> = vec![Vec::new(); count as usize];
-        for (i, c) in comp.iter().enumerate() {
+        for (i, c) in comp.to_vec().iter().enumerate() {
             groups[*c as usize].push(i);
         }
         let mut out: Vec<Vec<u64>> = groups.into_iter().map(|g| self.to_ids(g)).collect();
@@ -266,7 +266,7 @@ impl<'a> Digraph<'a> {
     /// Topological order, or `None` if the graph has a cycle.
     pub fn topsort(&self) -> Option<Vec<u64>> {
         algo::topological_sort(&self.out)
-            .map(|idx| idx.into_iter().map(|i| self.out.ids[i]).collect())
+            .map(|mut idx| idx.to_vec().into_iter().map(|i| self.out.ids[i as usize]).collect())
     }
 
     pub fn is_acyclic(&self) -> bool {
@@ -415,12 +415,12 @@ impl<'a> Digraph<'a> {
                 continue;
             };
             let labels: Vec<String> = node
-                .labels
+                .labels()
                 .iter()
                 .map(|l| self.graph.strings.name(*l).to_string())
                 .collect();
             let mut props: Vec<(String, Value)> = node
-                .props
+                .props()
                 .iter()
                 .map(|(k, v)| (self.graph.strings.name(*k).to_string(), v.clone()))
                 .collect();
@@ -444,7 +444,7 @@ impl<'a> Digraph<'a> {
                 };
                 let etype = self.graph.strings.name(edge.etype).to_string();
                 let props: Vec<(String, Value)> = edge
-                    .props
+                    .props()
                     .iter()
                     .map(|(k, v)| (self.graph.strings.name(*k).to_string(), v.clone()))
                     .collect();

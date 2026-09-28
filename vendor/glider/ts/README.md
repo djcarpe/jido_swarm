@@ -70,12 +70,15 @@ isolated graph.
 | | |
 |---|---|
 | `glider.open()` | a fresh in-memory graph |
+| `glider.openBytes(bytes)` | an in-memory graph loaded from a `.gldb` file's bytes |
 | `glider.version` | engine version |
 | `db.query(q)` | typed `QueryResult` — columns, rows, graph payload |
 | `db.run(q)` | run for effect, returns entities touched |
 | `db.graph(q)` | just the `{nodes, edges}` projection |
-| `db.schema()` | labels, relationship types, indexes, with counts |
+| `db.schema()` | labels, relationship types, indexes, with counts; sampled property keys per label and type |
 | `db.expand(id, limit?)` | neighbours of one node, both directions |
+| `db.nodes({label?, q?, from?, limit?})` | a page of nodes, cursor-paged by id; `q` searches labels, property values and ids |
+| `db.edges({type?, q?, from?, limit?})` | a page of relationships with their endpoints |
 | `db.importJsonl(text)` | bulk load |
 | `db.exportJsonl()` | dump the whole graph |
 | `db.stats()` | node/edge/label/index counts |
@@ -112,9 +115,21 @@ using db = glider.open()      // TypeScript 5.2+, closed at scope exit
 
 ## Persistence
 
-`wasm32-unknown-unknown` has no filesystem, so graphs are **in-memory only**.
-The file-backed modes — `glider_open`, the WAL, compaction, replication — are
-not reachable from this build.
+`wasm32-unknown-unknown` has no filesystem, so graphs are **in-memory only**:
+the same page format as a file, with the pages held in memory. The
+file-backed parts — the write-ahead log, checkpoints, replication — are not
+reachable from this build.
+
+A database file can still be *read*: hand its bytes to `openBytes` and its
+pages, as of its last checkpoint, are loaded into memory (a file from before
+paged storage is converted as it loads). Nothing is written back — the file
+is a starting point, not a live database. A database that spans segment
+files (over 64 GiB) cannot be loaded this way.
+
+```ts
+const bytes = await file.arrayBuffer()        // <input type=file>, fetch, fs.readFile
+const db = glider.openBytes(bytes)
+```
 
 Persist by moving JSONL yourself:
 
@@ -155,5 +170,5 @@ anyway. Give each Worker its own `loadGlider()`.
 
 ## Size
 
-The module is 459 KB uncompressed — 168 KB gzipped, 135 KB brotli. That is the
+The module is 824 KB uncompressed — 292 KB gzipped, 227 KB brotli. That is the
 entire database: storage layer, query engine and fifteen graph algorithms.

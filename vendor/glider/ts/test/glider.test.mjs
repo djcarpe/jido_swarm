@@ -210,3 +210,66 @@ describe('errors', () => {
     db.close()
   })
 })
+
+describe('paging', () => {
+  test('nodes page by id cursor and filter by label and text', () => {
+    const db = seeded()
+    const first = db.nodes({ limit: 2 })
+    assert.equal(first.nodes.length, 2)
+    assert.equal(first.total, 3)
+    assert.ok(first.next !== null)
+    const rest = db.nodes({ from: first.next, limit: 2 })
+    assert.equal(rest.nodes.length, 1)
+    assert.equal(rest.next, null)
+
+    assert.deepEqual(db.nodes({ label: 'City' }).nodes.map((n) => n.props.name), ['London'])
+    // Case-insensitive, against any property value.
+    assert.deepEqual(db.nodes({ q: 'ADA' }).nodes.map((n) => n.props.name), ['Ada'])
+    assert.equal(db.nodes({ q: 'nobody' }).nodes.length, 0)
+    // Degree rides along so a list can show connectivity.
+    assert.equal(db.nodes({ q: 'Ada' }).nodes[0].degree, 2)
+    db.close()
+  })
+
+  test('edges page with their endpoints', () => {
+    const db = seeded()
+    const page = db.edges({ type: 'KNOWS' })
+    assert.equal(page.edges.length, 1)
+    assert.equal(page.edges[0].type, 'KNOWS')
+    assert.equal(page.nodes.length, 2)
+    assert.equal(db.edges({ q: 'lives' }).edges.length, 1)
+    assert.equal(db.edges().total, 2)
+    db.close()
+  })
+
+  test('schema carries true node and edge totals', () => {
+    const db = seeded()
+    const s = db.schema()
+    assert.equal(s.nodes, 3)
+    assert.equal(s.edges, 2)
+    assert.deepEqual(s.node_keys.Person, ['age', 'name'])
+    assert.deepEqual(s.edge_keys.KNOWS, ['since'])
+    db.close()
+  })
+})
+
+describe('opening a database file', () => {
+  const fixture = new URL('./fixtures/people.gldb', import.meta.url)
+
+  test('a .gldb opens from its bytes', async () => {
+    const { readFile } = await import('node:fs/promises')
+    const db = glider.openBytes(await readFile(fixture))
+    assert.equal(nodeCount(db), 3)
+    const r = db.query('MATCH (a:Person)-[r:KNOWS]->(b) RETURN a.name, r.since, b.name')
+    assert.deepEqual(r.rows, [['Ada', 2019, 'Bob']])
+    // Writable, in memory only; ids carry on past the file's.
+    db.run('CREATE (:Person {name:"Cai"})')
+    assert.equal(nodeCount(db), 4)
+    db.close()
+  })
+
+  test('something that is not a database is an error', () => {
+    assert.throws(() => glider.openBytes(new TextEncoder().encode('{"hello":1}')), GliderError)
+    assert.throws(() => glider.openBytes(new Uint8Array(0)), /too short/)
+  })
+})

@@ -163,8 +163,6 @@ fn ship(db: &Path, dir: &Path, gen: &str, from: u64, to: u64) -> io::Result<Segm
     let len = to - from;
     let mut src = File::open(db)?;
     src.seek(SeekFrom::Start(from))?;
-    let mut buf = vec![0u8; len as usize];
-    src.read_exact(&mut buf)?;
 
     let seg_dir = dir.join(gen).join("segments");
     fs::create_dir_all(&seg_dir)?;
@@ -172,9 +170,18 @@ fn ship(db: &Path, dir: &Path, gen: &str, from: u64, to: u64) -> io::Result<Segm
     let tmp = seg_dir.join(format!("{from:016x}.partial"));
     let final_path = seg_dir.join(format!("{from:016x}.seg"));
     {
-        let mut f = File::create(&tmp)?;
-        f.write_all(&buf)?;
-        f.sync_all()?;
+        // Streamed: segment 0 carries the whole snapshot image, which can be
+        // far larger than the memory a replicator should need.
+        let mut f = io::BufWriter::with_capacity(1 << 20, File::create(&tmp)?);
+        let copied = io::copy(&mut (&mut src).take(len), &mut f)?;
+        if copied != len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "database shrank while shipping",
+            ));
+        }
+        f.flush()?;
+        f.get_ref().sync_all()?;
     }
     fs::rename(&tmp, &final_path)?;
 
@@ -498,7 +505,7 @@ fn note(opts: &TailOptions, msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::Graph;
+    use crate::legacy::graph::Graph;
     use crate::store::Sync;
     use crate::value::Value;
     use std::path::PathBuf;
@@ -623,6 +630,42 @@ mod tests {
         let old = dir.join("from-old.gldb");
         restore(&replica, Some(&first), None, &old).unwrap();
         assert_eq!(Graph::open(&old, Sync::Normal).unwrap().node_count(), 40);
+    }
+
+    #[test]
+    fn an_image_and_the_log_after_it_replicate_and_restore() {
+        let dir = tmpdir("image");
+        let db = dir.join("e.gldb");
+        let replica = dir.join("replica");
+        let opts = TailOptions {
+            once: true,
+            min_bytes: 0,
+            quiet: true,
+            ..Default::default()
+        };
+
+        let mut g = Graph::open(&db, Sync::Always).unwrap();
+        write_nodes(&mut g, 60);
+        g.compact().unwrap();
+        let h = store::read_header(&db).unwrap();
+        assert!(h.image_len > 0);
+        drop(g);
+        // Segment 0 carries the header and the whole image.
+        tail(&db, &replica, &opts).unwrap();
+
+        let mut g = Graph::open(&db, Sync::Always).unwrap();
+        write_nodes(&mut g, 15);
+        g.set_node_prop(1, "i", Value::Int(-1)).unwrap();
+        drop(g);
+        tail(&db, &replica, &opts).unwrap();
+
+        let out = dir.join("restored.gldb");
+        restore(&replica, None, None, &out).unwrap();
+        assert_eq!(fs::read(&db).unwrap(), fs::read(&out).unwrap());
+        let r = Graph::open(&out, Sync::Normal).unwrap();
+        assert_eq!(r.node_count(), 75);
+        assert_eq!(r.node_prop(1, "i"), Some(Value::Int(-1)));
+        assert!(r.stats().image_bytes > 0);
     }
 
     #[test]

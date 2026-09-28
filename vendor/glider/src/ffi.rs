@@ -118,6 +118,55 @@ pub unsafe extern "C" fn glider_open(path: *const c_char, sync: c_int) -> *mut G
     }
 }
 
+/// `glider_open` with the memory knob exposed: `cache_bytes` is the page
+/// cache (0 = the default, 1 GiB). RAM use stays near it however large the
+/// database grows; the database itself is limited only by the disk.
+///
+/// # Safety
+/// `path` must be a NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn glider_open_ex(
+    path: *const c_char,
+    sync: c_int,
+    cache_bytes: usize,
+) -> *mut GliderDb {
+    unsafe {
+        guard(std::ptr::null_mut(), || {
+            let path = as_str(path, "path")?;
+            let opts = crate::OpenOptions {
+                sync: match sync {
+                    0 => Sync::Always,
+                    2 => Sync::Off,
+                    _ => Sync::Normal,
+                },
+                cache_size: if cache_bytes == 0 {
+                    crate::storage::pager::DEFAULT_CACHE_BYTES
+                } else {
+                    cache_bytes as u64
+                },
+                ..crate::OpenOptions::default()
+            };
+            let graph = Graph::open_opts(Path::new(path), opts).map_err(|e| e.to_string())?;
+            Ok(Box::into_raw(Box::new(GliderDb { graph })))
+        })
+    }
+}
+
+/// A `:memory:` graph that may occupy at most `max_bytes` (0 = the
+/// machine's physical memory). Past the limit, writes fail with an error
+/// and are rolled back; the graph stays usable. NULL on error.
+#[no_mangle]
+pub extern "C" fn glider_open_memory_ex(max_bytes: u64) -> *mut GliderDb {
+    guard(std::ptr::null_mut(), || {
+        let graph = if max_bytes == 0 {
+            Graph::memory()
+        } else {
+            Graph::memory_with_limit(max_bytes)
+        };
+        Ok(Box::into_raw(Box::new(GliderDb { graph })))
+    })
+}
+
 /// A graph that never touches disk. Useful for tests, caches, and scratch
 /// work on a device where you do not want to spend storage.
 #[no_mangle]
@@ -127,6 +176,29 @@ pub extern "C" fn glider_open_memory() -> *mut GliderDb {
             graph: Graph::memory(),
         })))
     })
+}
+
+/// An in-memory graph loaded from the bytes of a `.gldb` file. Edits are not
+/// written back anywhere. For hosts with no filesystem, chiefly wasm, where
+/// the embedder reads the file and passes the bytes in. NULL on error.
+///
+/// # Safety
+/// `bytes` must point to `len` readable bytes (or be NULL with `len` 0).
+#[no_mangle]
+pub unsafe extern "C" fn glider_open_bytes(bytes: *const u8, len: usize) -> *mut GliderDb {
+    unsafe {
+        guard(std::ptr::null_mut(), || {
+            let data: &[u8] = if len == 0 {
+                &[]
+            } else if bytes.is_null() {
+                return Err("bytes is NULL".into());
+            } else {
+                std::slice::from_raw_parts(bytes, len)
+            };
+            let graph = Graph::from_bytes(data).map_err(|e| e.to_string())?;
+            Ok(Box::into_raw(Box::new(GliderDb { graph })))
+        })
+    }
 }
 
 /// Flush, close and free the handle. Safe to call with NULL.
@@ -203,9 +275,9 @@ pub unsafe extern "C" fn glider_checkpoint(db: *mut GliderDb) -> c_int {
     }
 }
 
-/// Rewrite the log as a minimal snapshot, reclaiming deleted space.
-/// Potentially slow and I/O heavy — do not call it on the UI thread, and on
-/// iOS wrap it in a background task so the OS does not suspend you mid-write.
+/// On paged storage, the same as `glider_checkpoint`: fold the log into the
+/// pages. Freed pages are reused as the database grows, so there is no
+/// separate rewrite step. Kept for callers written against the older engine.
 ///
 /// # Safety
 /// `db` must be a live handle.
@@ -215,6 +287,23 @@ pub unsafe extern "C" fn glider_compact(db: *mut GliderDb) -> c_int {
         guard(-1, || {
             let db = as_db(db)?;
             db.graph.compact().map_err(|e| e.to_string())?;
+            Ok(0)
+        })
+    }
+}
+
+/// Checkpoint automatically once this many bytes of write-ahead log have
+/// accumulated (0 = only on close or `glider_checkpoint`). Bounds the time a
+/// crash recovery can take. Default 256 MiB.
+///
+/// # Safety
+/// `db` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn glider_set_auto_compact(db: *mut GliderDb, bytes: u64) -> c_int {
+    unsafe {
+        guard(-1, || {
+            let db = as_db(db)?;
+            db.graph.set_checkpoint_bytes(if bytes == 0 { u64::MAX } else { bytes });
             Ok(0)
         })
     }
@@ -359,6 +448,73 @@ pub unsafe extern "C" fn glider_expand_json(
         guard(std::ptr::null_mut(), || {
             let db = as_db(db)?;
             out_string(crate::api::expand_json(&db.graph, id, limit.min(10_000))?)
+        })
+    }
+}
+
+/// Optional C string: NULL means "not given" rather than an error.
+unsafe fn as_opt_str<'a>(p: *const c_char, what: &str) -> Result<Option<&'a str>, String> {
+    if p.is_null() {
+        return Ok(None);
+    }
+    unsafe { as_str(p, what).map(Some) }
+}
+
+/// A page of nodes for the explorer: `{nodes, next, total}`. `label` and `q`
+/// may be NULL; `from` is the id cursor (0 for the first page).
+///
+/// # Safety
+/// `db` must be a live handle; `label` and `q` NULL or NUL-terminated UTF-8.
+/// Free the result with `glider_free`.
+#[no_mangle]
+pub unsafe extern "C" fn glider_nodes_json(
+    db: *mut GliderDb,
+    label: *const c_char,
+    q: *const c_char,
+    from: u64,
+    limit: usize,
+) -> *mut c_char {
+    unsafe {
+        guard(std::ptr::null_mut(), || {
+            let db = as_db(db)?;
+            let label = as_opt_str(label, "label")?;
+            let q = as_opt_str(q, "q")?;
+            out_string(crate::api::nodes_json(
+                &db.graph,
+                label,
+                q,
+                from,
+                limit.clamp(1, 1000),
+            ))
+        })
+    }
+}
+
+/// A page of edges with their endpoints: `{edges, nodes, next, total}`.
+/// Same contract as `glider_nodes_json`, filtering by relationship `etype`.
+///
+/// # Safety
+/// As `glider_nodes_json`.
+#[no_mangle]
+pub unsafe extern "C" fn glider_edges_json(
+    db: *mut GliderDb,
+    etype: *const c_char,
+    q: *const c_char,
+    from: u64,
+    limit: usize,
+) -> *mut c_char {
+    unsafe {
+        guard(std::ptr::null_mut(), || {
+            let db = as_db(db)?;
+            let etype = as_opt_str(etype, "type")?;
+            let q = as_opt_str(q, "q")?;
+            out_string(crate::api::edges_json(
+                &db.graph,
+                etype,
+                q,
+                from,
+                limit.clamp(1, 1000),
+            ))
         })
     }
 }
