@@ -21,6 +21,23 @@ defmodule JidoSwarm.Hive.Feed do
   `{:hive_delta, entry}`, so a LiveView updates the moment the graph does
   rather than when the timer fires.
 
+  ## The probe
+
+  "Replicated" is a claim until you can watch it. `probe/1` writes one node
+  from this pod; every other pod's feed, on seeing it arrive, writes an
+  acknowledgement back *through the same graph*, and this feed times the round
+  trip when the acknowledgement lands. Nothing outside the graph carries the
+  answer, so an ack on screen is proof the write went out and the reply came
+  back the same way every insight does.
+
+  ## The conflict
+
+  `conflict/1` writes one key from this pod and, over `:erpc`, from another,
+  as close together as a call allows. Both replicas keep whichever write has
+  the higher stamp — sequence, then origin — and the console shows which and
+  why. It is the convergence rule made visible, not a race that could go
+  either way.
+
   ## Why one subscriber and no graph reads
 
   The router sends every matching delta to every subscriber, so ten LiveViews
@@ -45,9 +62,24 @@ defmodule JidoSwarm.Hive.Feed do
   alias Jido.Context.Mesh
   alias JidoSwarm.Hive.Canvas
 
+  alias JidoSwarm.Hive.Store
+
   @default_topics ["hive.**", "knowledge.**", "context.**"]
   @default_ring 200
   @lag_samples 64
+
+  @probe_label "HiveProbe"
+  @ack_label "HiveProbeAck"
+  @probe_timeout_ms 5_000
+  @probes_kept 10
+  # Probes and acks are the only Hive entities nobody needs later; each pod
+  # removes its own once they are an hour old.
+  @sweep_every_ms 600_000
+  @sweep_after_ms 3_600_000
+  @peer_timeout_ms 1_000
+
+  @conflict_key "demo:conflict"
+  @conflict_label "HiveDemo"
 
   # More deltas than this inside one window is a replay, not activity — the S3
   # log catching up, a pod restoring. The console is told once and re-reads,
@@ -90,9 +122,11 @@ defmodule JidoSwarm.Hive.Feed do
     graph = Keyword.get(opts, :graph, JidoSwarm.graph())
     mesh = Keyword.get(opts, :mesh, JidoSwarm.mesh())
     :ok = Mesh.subscribe(mesh, Keyword.get(opts, :topics, @default_topics))
+    Process.send_after(self(), :sweep, @sweep_every_ms)
 
     {:ok,
      %{
+       name: Keyword.get(opts, :name, __MODULE__),
        graph: graph,
        mesh: mesh,
        origin: Jido.Context.Graph.origin(graph),
@@ -102,7 +136,8 @@ defmodule JidoSwarm.Hive.Feed do
        ring_size: Keyword.get(opts, :ring, @default_ring),
        ring: [],
        origins: %{},
-       burst: {0, 0}
+       burst: {0, 0},
+       probes: %{}
      }}
   end
 
@@ -147,8 +182,8 @@ defmodule JidoSwarm.Hive.Feed do
     nodes = Node.list()
 
     remote =
-      nodes
-      |> :erpc.multicall(__MODULE__, :identity, [name], timeout)
+      name
+      |> remote_identities(timeout)
       |> Enum.zip(nodes)
       |> Enum.map(fn
         {{:ok, %{origin: origin, seen: seen}}, node} ->
@@ -162,6 +197,55 @@ defmodule JidoSwarm.Hive.Feed do
       %{node: mine.node, origin: mine.origin, local?: true, connected?: true, seen: mine.seen}
       | remote
     ]
+  end
+
+  @doc """
+  Writes a probe from this replica and waits for the other pods to answer
+  through the graph. Returns the probe's id; watch `probes/1` or the
+  `{:hive_probe, probe}` broadcasts for the acknowledgements as they land.
+  """
+  @spec probe(GenServer.server()) :: {:ok, String.t()} | {:error, term()}
+  def probe(server \\ __MODULE__), do: GenServer.call(server, :probe)
+
+  @doc """
+  The last #{@probes_kept} probes, newest first, each with the origins it
+  expected an answer from, the acknowledgements so far with their round-trip
+  and one-way times, and whether it timed out.
+  """
+  @spec probes(GenServer.server()) :: [map()]
+  def probes(server \\ __MODULE__), do: GenServer.call(server, :probes)
+
+  @doc """
+  Writes `#{@conflict_key}` from this pod and from one other, so the operator
+  can watch last-writer-wins pick one. Returns both writes' stamps; read the
+  key a moment later to see which survived on every replica.
+  """
+  @spec conflict(GenServer.server()) :: {:ok, map()} | {:error, :no_peers | term()}
+  def conflict(server \\ __MODULE__), do: GenServer.call(server, :conflict)
+
+  @doc "The other side of `conflict/1`: writes the demo key from this replica."
+  @spec write_conflict(GenServer.server(), String.t()) ::
+          {:ok, %{seq: non_neg_integer(), origin: String.t()}} | {:error, term()}
+  def write_conflict(server \\ __MODULE__, key),
+    do: GenServer.call(server, {:write_conflict, key})
+
+  @doc """
+  Why one stamp beat another, in a sentence.
+
+      iex> JidoSwarm.Hive.Feed.explain({57, "pod-a"}, {55, "pod-b"})
+      "pod-a's write carried sequence 57 against pod-b's 55: the higher clock wins."
+
+      iex> JidoSwarm.Hive.Feed.explain({9, "pod-b"}, {9, "pod-a"})
+      "Both writes carried sequence 9, so the origin breaks the tie: \\"pod-b\\" sorts after \\"pod-a\\"."
+  """
+  @spec explain({non_neg_integer(), String.t()}, {non_neg_integer(), String.t()}) :: String.t()
+  def explain({seq, winner}, {seq, loser}) do
+    "Both writes carried sequence #{seq}, so the origin breaks the tie: " <>
+      "#{inspect(winner)} sorts after #{inspect(loser)}."
+  end
+
+  def explain({ws, winner}, {ls, loser}) do
+    "#{winner}'s write carried sequence #{ws} against #{loser}'s #{ls}: the higher clock wins."
   end
 
   @doc "Forgets the ring and the counters. For tests and the console's reset."
@@ -198,7 +282,79 @@ defmodule JidoSwarm.Hive.Feed do
   end
 
   def handle_call(:reset, _from, state) do
-    {:reply, :ok, %{state | ring: [], origins: %{}, burst: {0, 0}}}
+    {:reply, :ok, %{state | ring: [], origins: %{}, burst: {0, 0}, probes: %{}}}
+  end
+
+  def handle_call(:probe, _from, state) do
+    id = Store.new_id("p")
+    now = now()
+
+    expected =
+      remote_identities(state.name, @peer_timeout_ms)
+      |> Enum.flat_map(fn
+        {:ok, %{origin: origin}} -> [origin]
+        _ -> []
+      end)
+
+    ops = [
+      {:put_node, "probe:" <> id, [@probe_label], %{"origin" => state.origin, "sent_at" => now}}
+    ]
+
+    case Jido.Context.commit(state.graph, ops, topic: Store.topic(:signals)) do
+      {:ok, _} ->
+        probe = %{
+          id: id,
+          key: "probe:" <> id,
+          sent_at: now,
+          expected: expected,
+          acks: [],
+          timed_out: false
+        }
+
+        Process.send_after(self(), {:probe_timeout, id}, @probe_timeout_ms)
+        {:reply, {:ok, id}, put_probe(state, probe)}
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call(:probes, _from, state) do
+    {:reply, probe_list(state), state}
+  end
+
+  def handle_call(:conflict, _from, state) do
+    peers =
+      remote_identities(state.name, @peer_timeout_ms)
+      |> Enum.zip(Node.list())
+      |> Enum.flat_map(fn
+        {{:ok, %{origin: origin}}, node} -> [{node, origin}]
+        _ -> []
+      end)
+
+    case peers do
+      [] ->
+        {:reply, {:error, :no_peers}, state}
+
+      [{node, _origin} | _] ->
+        with {:ok, mine} <- write_demo(state.graph, state.origin, @conflict_key),
+             {:ok, theirs} <-
+               :erpc.call(
+                 node,
+                 __MODULE__,
+                 :write_conflict,
+                 [state.name, @conflict_key],
+                 @peer_timeout_ms
+               ) do
+          {:reply, {:ok, %{key: @conflict_key, mine: mine, theirs: theirs}}, state}
+        else
+          error -> {:reply, {:error, error}, state}
+        end
+    end
+  end
+
+  def handle_call({:write_conflict, key}, _from, state) do
+    {:reply, write_demo(state.graph, state.origin, key), state}
   end
 
   @impl true
@@ -212,11 +368,150 @@ defmodule JidoSwarm.Hive.Feed do
       state
       |> record(delta, entry, now)
       |> announce(Map.put(entry, :draw, Canvas.delta_ops(delta)), now)
+      |> react(delta, now)
 
     {:noreply, state}
   end
 
+  def handle_info({:probe_timeout, id}, state) do
+    case state.probes[id] do
+      %{acks: acks, expected: expected} = probe when length(acks) < length(expected) ->
+        probe = %{probe | timed_out: true}
+        broadcast(state, {:hive_probe, probe})
+        {:noreply, put_probe(state, probe)}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info(:sweep, state) do
+    Process.send_after(self(), :sweep, @sweep_every_ms)
+    sweep(state)
+    cutoff = now() - @sweep_after_ms
+    probes = state.probes |> Enum.reject(fn {_, p} -> p.sent_at < cutoff end) |> Map.new()
+    {:noreply, %{state | probes: probes}}
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # ===========================================================================
+  # Probes
+  # ===========================================================================
+
+  # Another pod's probe gets an acknowledgement written back through the
+  # graph; an acknowledgement of one of ours gets timed.
+  defp react(state, %Delta{origin: origin}, _now) when origin == state.origin, do: state
+
+  defp react(state, %Delta{} = delta, now) do
+    Enum.reduce(delta.ops, state, fn
+      {:put_node, "probe:" <> id, labels, props}, acc ->
+        if @probe_label in labels, do: acknowledge(acc, id, props, now), else: acc
+
+      {:put_node, "ack:" <> _, labels, props}, acc ->
+        if @ack_label in labels, do: timed(acc, delta.origin, props, now), else: acc
+
+      _, acc ->
+        acc
+    end)
+  end
+
+  defp acknowledge(state, id, props, now) do
+    key = "ack:#{id}:#{state.origin}"
+
+    ops = [
+      {:put_node, key, [@ack_label],
+       %{
+         "probe" => id,
+         "origin" => state.origin,
+         "received_at" => now,
+         "probe_sent_at" => props["sent_at"]
+       }},
+      {:put_edge, key, "ACKS", "probe:" <> id, %{}}
+    ]
+
+    case Jido.Context.commit(state.graph, ops, topic: Store.topic(:signals)) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("hive feed: could not acknowledge probe #{id}: #{inspect(reason)}")
+    end
+
+    state
+  end
+
+  defp timed(state, origin, props, now) do
+    case state.probes[props["probe"]] do
+      nil ->
+        state
+
+      probe ->
+        if Enum.any?(probe.acks, &(&1.origin == origin)) do
+          state
+        else
+          ack = %{
+            origin: origin,
+            rtt_ms: max(now - probe.sent_at, 0),
+            one_way_ms: props["received_at"] && props["received_at"] - probe.sent_at,
+            at: now
+          }
+
+          probe = %{probe | acks: probe.acks ++ [ack]}
+          broadcast(state, {:hive_probe, probe})
+          put_probe(state, probe)
+        end
+    end
+  end
+
+  defp put_probe(state, probe) do
+    probes =
+      state.probes
+      |> Map.put(probe.id, probe)
+      |> Enum.sort_by(fn {_, p} -> -p.sent_at end)
+      |> Enum.take(@probes_kept)
+      |> Map.new()
+
+    %{state | probes: probes}
+  end
+
+  defp probe_list(state) do
+    state.probes |> Map.values() |> Enum.sort_by(&(-&1.sent_at))
+  end
+
+  defp sweep(state) do
+    cutoff = now() - @sweep_after_ms
+
+    for {label, field} <- [{@probe_label, "sent_at"}, {@ack_label, "received_at"}],
+        %{key: key} <-
+          Store.rows(
+            "MATCH (n:#{label}) WHERE n._origin = #{Store.lit(state.origin)} AND n.#{field} < #{cutoff} RETURN n._key",
+            [:key]
+          ) do
+      Jido.Context.retract(state.graph, key, topic: Store.topic(:signals))
+    end
+
+    :ok
+  rescue
+    e -> Logger.warning("hive feed: sweep failed: #{Exception.message(e)}")
+  end
+
+  defp write_demo(graph, origin, key) do
+    props = %{"value" => "written by #{origin}", "at" => now()}
+
+    case Jido.Context.commit(graph, [{:put_node, key, [@conflict_label], props}],
+           topic: Store.topic(:signals)
+         ) do
+      {:ok, %Delta{seq: seq}} -> {:ok, %{seq: seq, origin: origin}}
+      {:error, _} = error -> error
+    end
+  end
+
+  # What every other node's feed reports, in `Node.list/0` order; a node that
+  # does not answer in time is an error tuple in its slot.
+  defp remote_identities(name, timeout) do
+    :erpc.multicall(Node.list(), __MODULE__, :identity, [name], timeout)
+  end
 
   # ===========================================================================
   # Recording

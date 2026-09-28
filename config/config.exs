@@ -103,7 +103,8 @@ config :jido_swarm, JidoSwarm.Repos,
       source: "/home/dj/Work/jido",
       default_branch: "main",
       test_command: "mix test",
-      description: "An autonomous agent framework for Elixir, built for workflows and multi-agent systems."
+      description:
+        "An autonomous agent framework for Elixir, built for workflows and multi-agent systems."
     },
     %{
       name: "glider",
@@ -111,7 +112,8 @@ config :jido_swarm, JidoSwarm.Repos,
       source: "/home/dj/Work/glider",
       default_branch: "main",
       test_command: "cargo test",
-      description: "An embeddable property-graph database in a single binary, with zero external crates."
+      description:
+        "An embeddable property-graph database in a single binary, with zero external crates."
     },
     %{
       name: "glider_ex",

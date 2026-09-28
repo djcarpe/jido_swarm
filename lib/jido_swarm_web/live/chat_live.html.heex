@@ -222,6 +222,7 @@
           </div>
           <div :if={@tab == :hive and @mesh.me} class="space-y-3 text-sm">
             <.node_drawer :if={@selected} selected={@selected} mesh={@mesh} />
+            <.probe_panel mesh={@mesh} probes={@probes} conflict={@conflict} />
             <.delta_ticker mesh={@mesh} />
           </div>
 

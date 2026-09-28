@@ -126,6 +126,94 @@ defmodule JidoSwarmWeb.HiveComponents do
     """
   end
 
+  @doc """
+  Proof on demand: ping the mesh and watch the other pods answer through the
+  graph, or write one key from two pods and see which write survives.
+  """
+  attr :mesh, :map, required: true
+  attr :probes, :list, default: []
+  attr :conflict, :any, default: nil
+
+  def probe_panel(assigns) do
+    reachable = Enum.filter(assigns.mesh.peers, &(not &1.local? and &1.connected?))
+    assigns = assign(assigns, reachable: reachable, latest: List.first(assigns.probes))
+
+    ~H"""
+    <div class="space-y-1 text-xs">
+      <div class="flex flex-wrap items-center gap-1">
+        <button
+          class="btn btn-xs btn-outline"
+          phx-click="hive_probe"
+          disabled={@reachable == []}
+          title={
+            if @reachable == [],
+              do: "No other replica is connected; a probe would have nobody to answer it.",
+              else:
+                "Write a probe node here and time every other pod's acknowledgement, written back through the graph."
+          }
+        >
+          ping the mesh
+        </button>
+        <button
+          class="btn btn-xs btn-outline"
+          phx-click="hive_conflict"
+          disabled={@reachable == []}
+          title="Write the same key from this pod and another, and see which write every replica keeps."
+        >
+          race two writes
+        </button>
+        <span :if={@reachable == []} class="opacity-60">
+          one replica — connect another pod to try these
+        </span>
+      </div>
+
+      <div :if={@latest} id="hive-probe" class="font-mono">
+        <span class="opacity-60">probe {@latest.id} ·</span>
+        <span :if={@latest.acks == [] and not @latest.timed_out}>waiting…</span>
+        <span :if={@latest.acks != []}>
+          {length(@latest.acks)} of {max(length(@latest.expected), length(@latest.acks))} answered
+        </span>
+        <span :if={@latest.timed_out} class="text-warning">
+          · {length(@latest.expected) - length(@latest.acks)} did not answer in 5s
+        </span>
+        <div :for={ack <- @latest.acks} class="pl-2">
+          <span
+            class="inline-block w-2 h-2 rounded-full"
+            style={"background: #{color(@mesh, ack.origin)}"}
+          ></span>
+          <span style={"color: #{color(@mesh, ack.origin)}"}>{ack.origin}</span>
+          <span class="opacity-70">
+            round trip {ack.rtt_ms}ms{if ack.one_way_ms, do: " · one way ~#{ack.one_way_ms}ms"}
+          </span>
+        </div>
+      </div>
+
+      <div :if={@conflict} id="hive-conflict" class="border-l-2 border-base-300 pl-2">
+        <%= case @conflict do %>
+          <% %{error: reason} -> %>
+            <span class="text-warning">The race could not run: {reason}</span>
+          <% %{winner: winner, loser: loser, explanation: explanation, key: key} -> %>
+            <span class="font-mono">{key}</span>
+            <span class="opacity-60">was written from</span>
+            <span class="font-mono" style={"color: #{color(@mesh, winner.origin)}"}>{winner.origin}</span>
+            <span class="opacity-60">and</span>
+            <span class="font-mono" style={"color: #{color(@mesh, loser.origin)}"}>{loser.origin}</span>
+            <span class="opacity-60">at once.</span>
+            <span>
+              Every replica kept <span
+                class="font-mono"
+                style={"color: #{color(@mesh, winner.origin)}"}
+              >{winner.origin}</span>'s.
+            </span>
+            <div class="opacity-70">{explanation}</div>
+          <% _ -> %>
+            <span class="opacity-60">racing…</span>
+        <% end %>
+      </div>
+    </div>
+    """
+  end
+
   @doc "The last deltas, newest first: who wrote what, and how long it took to get here."
   attr :mesh, :map, required: true
   attr :limit, :integer, default: 12

@@ -51,6 +51,8 @@ defmodule JidoSwarmWeb.ChatLive do
      |> assign(:selected, nil)
      |> assign(:filters, default_filters())
      |> assign(:expanded?, false)
+     |> assign(:probes, [])
+     |> assign(:conflict, nil)
      |> load()
      |> load_hive()
      |> load_mesh()
@@ -207,6 +209,29 @@ defmodule JidoSwarmWeb.ChatLive do
     {:noreply, socket |> assign(:filters, filters) |> push_event("hive:filter", filters)}
   end
 
+  def handle_event("hive_probe", _params, socket) do
+    case canvas(fn -> Feed.probe() end) do
+      {:ok, _id} -> {:noreply, assign(socket, :probes, Feed.probes())}
+      _ -> {:noreply, put_flash(socket, :error, "The probe could not be written.")}
+    end
+  end
+
+  # Both writes go out at once; the graph needs a moment to apply the one
+  # from the other pod before the winner can be read off this replica.
+  def handle_event("hive_conflict", _params, socket) do
+    case canvas(fn -> Feed.conflict() end) do
+      {:ok, race} ->
+        Process.send_after(self(), {:hive_conflict_settle, race}, conflict_settle_ms())
+        {:noreply, assign(socket, :conflict, %{racing: true})}
+
+      {:error, :no_peers} ->
+        {:noreply, assign(socket, :conflict, %{error: "no other replica is connected"})}
+
+      other ->
+        {:noreply, assign(socket, :conflict, %{error: inspect(other)})}
+    end
+  end
+
   def handle_event("hive_toggle_expand", _params, socket) do
     {:noreply, assign(socket, :expanded?, not socket.assigns.expanded?)}
   end
@@ -273,6 +298,37 @@ defmodule JidoSwarmWeb.ChatLive do
 
   def handle_info(:hive_refresh, socket) do
     {:noreply, socket |> assign(:hive_refresh_pending?, false) |> load_hive()}
+  end
+
+  def handle_info({:hive_probe, _probe}, socket) do
+    {:noreply, assign(socket, :probes, canvas(fn -> Feed.probes() end) || [])}
+  end
+
+  def handle_info({:hive_conflict_settle, race}, socket) do
+    conflict =
+      case JidoSwarm.Hive.Store.get(race.key) do
+        %{"_seq" => seq, "_origin" => origin} ->
+          winner = {seq, origin}
+          stamps = [{race.mine.seq, race.mine.origin}, {race.theirs.seq, race.theirs.origin}]
+
+          case Enum.reject(stamps, &(&1 == winner)) do
+            [{lseq, lorigin}] ->
+              %{
+                key: race.key,
+                winner: %{seq: seq, origin: origin},
+                loser: %{seq: lseq, origin: lorigin},
+                explanation: Feed.explain(winner, {lseq, lorigin})
+              }
+
+            _ ->
+              %{error: "the key on this replica carries neither write's stamp yet"}
+          end
+
+        _ ->
+          %{error: "the key could not be read back"}
+      end
+
+    {:noreply, assign(socket, :conflict, conflict)}
   end
 
   def handle_info(:hive_tick, socket), do: {:noreply, load_hive(socket)}
@@ -359,7 +415,8 @@ defmodule JidoSwarmWeb.ChatLive do
         empty_mesh()
       end
 
-    assign(socket, :mesh, mesh)
+    probes = if feed_up?(), do: Feed.probes(), else: []
+    socket |> assign(:mesh, mesh) |> assign(:probes, probes)
   rescue
     _ -> assign(socket, :mesh, empty_mesh())
   catch
@@ -441,6 +498,8 @@ defmodule JidoSwarmWeb.ChatLive do
   end
 
   defp default_filters, do: %{kinds: [], origins: [], window_ms: nil, remote_only: false}
+
+  defp conflict_settle_ms, do: Application.get_env(:jido_swarm, :hive_settle_ms, 150) + 300
 
   defp parse_window(value) when value in [nil, "", "all"], do: nil
 

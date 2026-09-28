@@ -4,6 +4,8 @@ defmodule JidoSwarm.Hive.FeedTest do
   alias Jido.Context
   alias JidoSwarm.Hive.Feed
 
+  doctest Feed
+
   # Two replicas on one private mesh, as two pods would be — except that
   # without a transport the router alone carries deltas between them, which is
   # all the feed can see anyway.
@@ -17,7 +19,11 @@ defmodule JidoSwarm.Hive.FeedTest do
 
     topic = "hive_test_#{n}"
     feed = :"feed_#{n}"
-    start_supervised!({Feed, name: feed, graph: a, mesh: mesh, pubsub_topic: topic, ring: 5})
+
+    start_supervised!({Feed, name: feed, graph: a, mesh: mesh, pubsub_topic: topic, ring: 5},
+      id: feed
+    )
+
     Phoenix.PubSub.subscribe(JidoSwarm.PubSub, topic)
 
     {:ok, a: a, b: b, feed: feed, mesh: mesh}
@@ -116,6 +122,86 @@ defmodule JidoSwarm.Hive.FeedTest do
 
   test "the peer table starts with this replica", %{feed: feed} do
     assert [%{origin: "pod-a", local?: true, connected?: true, seen: %{}} | _] = Feed.peers(feed)
+  end
+
+  describe "the probe" do
+    setup %{b: b, mesh: mesh} do
+      # The other replica's feed, so it can answer.
+      n = System.unique_integer([:positive])
+      other = :"feed_other_#{n}"
+
+      start_supervised!(
+        {Feed, name: other, graph: b, mesh: mesh, pubsub_topic: "hive_other_#{n}"}
+      )
+
+      {:ok, other: other}
+    end
+
+    test "a probe from one replica is answered by the other, through the graph", %{
+      feed: feed,
+      a: a,
+      b: b
+    } do
+      {:ok, id} = Feed.probe(feed)
+
+      # The probe node went out from pod-a and arrived on pod-b's graph...
+      assert_receive {:hive_delta, %{origin: "pod-a", summary: "+probe" <> _}}
+      assert {:ok, %{props: %{"origin" => "pod-a"}}} = Context.fetch(b, "probe:" <> id)
+
+      # ...and pod-b's answer came back the same way, timed on arrival.
+      assert_receive {:hive_probe, %{id: ^id, acks: [ack]}}, 2_000
+      assert %{origin: "pod-b", rtt_ms: rtt, one_way_ms: one_way} = ack
+      assert is_integer(rtt) and rtt >= 0 and is_integer(one_way)
+      assert {:ok, %{props: %{"probe" => ^id}}} = Context.fetch(a, "ack:#{id}:pod-b")
+
+      [probe] = Feed.probes(feed)
+      assert probe.id == id and length(probe.acks) == 1
+      refute probe.timed_out
+    end
+
+    test "a replica does not answer its own probe", %{feed: feed} do
+      {:ok, id} = Feed.probe(feed)
+      assert_receive {:hive_probe, %{id: ^id}}, 2_000
+      refute_receive {:hive_probe, %{id: ^id, acks: [_, _]}}, 200
+      [probe] = Feed.probes(feed)
+      refute Enum.any?(probe.acks, &(&1.origin == "pod-a"))
+    end
+  end
+
+  describe "the conflict demo" do
+    test "needs another pod", %{feed: feed} do
+      assert Feed.conflict(feed) == {:error, :no_peers}
+    end
+
+    test "two writes to one key converge on the higher stamp everywhere", %{
+      a: a,
+      b: b,
+      feed: feed,
+      mesh: mesh
+    } do
+      n = System.unique_integer([:positive])
+      other = :"feed_other_#{n}"
+
+      start_supervised!(
+        {Feed, name: other, graph: b, mesh: mesh, pubsub_topic: "hive_other_#{n}"}
+      )
+
+      {:ok, mine} = Feed.write_conflict(feed, "demo:conflict")
+      {:ok, theirs} = Feed.write_conflict(other, "demo:conflict")
+      :ok = Context.sync(a)
+      :ok = Context.sync(b)
+
+      assert mine.origin == "pod-a" and theirs.origin == "pod-b"
+
+      {:ok, %{props: on_a}} = Context.fetch(a, "demo:conflict")
+      {:ok, %{props: on_b}} = Context.fetch(b, "demo:conflict")
+      assert {on_a["_seq"], on_a["_origin"]} == {on_b["_seq"], on_b["_origin"]}
+
+      winner = {on_a["_seq"], on_a["_origin"]}
+      stamps = [{mine.seq, mine.origin}, {theirs.seq, theirs.origin}]
+      assert winner == Enum.max_by(stamps, fn {seq, origin} -> {seq, origin} end)
+      assert Feed.explain(winner, Enum.min(stamps)) =~ "wins"
+    end
   end
 
   test "reset forgets everything", %{b: b, feed: feed} do
