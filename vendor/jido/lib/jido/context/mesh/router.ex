@@ -62,7 +62,7 @@ defmodule Jido.Context.Mesh.Router do
 
   @impl true
   def handle_cast({:publish, delta}, state) do
-    state = fanout(state, delta)
+    state = fanout(state, delta, :publish)
 
     for {mod, opts} <- state.transports do
       case mod.publish(delta, opts) do
@@ -80,7 +80,7 @@ defmodule Jido.Context.Mesh.Router do
     {:noreply, state}
   end
 
-  def handle_cast({:deliver, delta}, state), do: {:noreply, fanout(state, delta)}
+  def handle_cast({:deliver, delta}, state), do: {:noreply, fanout(state, delta, :deliver)}
 
   @impl true
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
@@ -89,14 +89,36 @@ defmodule Jido.Context.Mesh.Router do
 
   def handle_info(_msg, state), do: {:noreply, state}
 
-  defp fanout(state, %Delta{} = delta) do
+  # One telemetry event per delta, whichever way it went: `:publish` for a
+  # local write going out, `:deliver` for one arriving over a transport, and
+  # `:duplicate` for an echo the window caught. Measuring here rather than in
+  # the graph is what makes "how much is arriving" and "how much is applied"
+  # two different numbers, which they are.
+  defp fanout(state, %Delta{} = delta, kind) do
+    metadata = %{
+      mesh: state.name,
+      id: delta.id,
+      origin: delta.origin,
+      topic: delta.topic,
+      seq: delta.seq,
+      ts: delta.ts
+    }
+
     if MapSet.member?(state.seen_set, delta.id) do
+      :telemetry.execute([:jido, :context, :mesh, :duplicate], %{count: 1}, metadata)
       state
     else
-      for {pid, patterns} <- state.subscribers,
-          Enum.any?(patterns, &Delta.topic_match?(delta.topic, &1)) do
-        send(pid, {:jido_context_delta, state.name, delta})
-      end
+      delivered =
+        for {pid, patterns} <- state.subscribers,
+            Enum.any?(patterns, &Delta.topic_match?(delta.topic, &1)) do
+          send(pid, {:jido_context_delta, state.name, delta})
+        end
+
+      :telemetry.execute(
+        [:jido, :context, :mesh, kind],
+        %{count: 1, ops: length(delta.ops), subscribers: length(delivered)},
+        metadata
+      )
 
       remember(state, delta.id)
     end

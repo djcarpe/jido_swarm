@@ -44,6 +44,23 @@ defmodule Jido.Context.Graph do
   arriving later cannot resurrect it. Tombstones are the only `:CtxTomb` nodes
   and are invisible to `:Ctx` queries.
 
+  ## Telemetry
+
+  Every delta applied — the graph's own writes and those arriving from the
+  mesh alike — is one event, so what the rule decided is countable:
+
+  | Event | Measurements |
+  |---|---|
+  | `[:jido, :context, :delta, :applied]` | `duration`, `ops`, `applied`, `superseded`, `tombstoned` |
+  | `[:jido, :context, :delta, :failed]` | `duration` |
+
+  Metadata carries `graph`, `id`, `origin`, `topic`, `seq`, `ts`, `local`
+  (did this graph write it) and, on `:applied`, `outcomes` — one of
+  `:applied | :superseded | :tombstoned` per operation, in order. A
+  superseded operation lost to a write with a higher stamp; a tombstoned one
+  lost to a deletion. Neither is an error: that is last-writer-wins
+  converging, now visible. `telemetry_events/0` lists the names.
+
   ## Durability
 
   Two independent things, worth keeping apart:
@@ -281,6 +298,11 @@ defmodule Jido.Context.Graph do
   def snapshot(graph, opts \\ []),
     do: GenServer.call(process_name(graph), :snapshot, timeout(opts))
 
+  @doc "The telemetry events this graph emits; see the module documentation."
+  @spec telemetry_events() :: [[atom()]]
+  def telemetry_events,
+    do: [[:jido, :context, :delta, :applied], [:jido, :context, :delta, :failed]]
+
   @doc "This graph's origin, as it appears in delta stamps."
   @spec origin(atom()) :: String.t()
   def origin(graph), do: GenServer.call(process_name(graph), :origin)
@@ -394,13 +416,62 @@ defmodule Jido.Context.Graph do
   # Applying operations
   # ===========================================================================
 
+  # Every operation reports what became of it — `:applied`, `:superseded` by
+  # a write with a higher stamp, or `:tombstoned` by a deletion that wins —
+  # and the delta as a whole is one telemetry event carrying the tally. A
+  # losing write is not an error; it is the convergence rule working, and
+  # until it was counted nobody could see it happen.
   defp apply_ops(state, %Delta{} = delta) do
-    Enum.reduce_while(delta.ops, {:ok, state}, fn op, {:ok, acc} ->
-      case apply_op(acc, delta, op) do
-        {:ok, acc} -> {:cont, {:ok, acc}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    started = System.monotonic_time()
+
+    result =
+      Enum.reduce_while(delta.ops, {:ok, state, []}, fn op, {:ok, acc, outcomes} ->
+        case apply_op(acc, delta, op) do
+          {:ok, acc, outcome} -> {:cont, {:ok, acc, [outcome | outcomes]}}
+          {:error, reason} -> {:halt, {:error, reason, outcomes}}
+        end
+      end)
+
+    duration = System.monotonic_time() - started
+
+    metadata = %{
+      graph: state.name,
+      id: delta.id,
+      origin: delta.origin,
+      topic: delta.topic,
+      seq: delta.seq,
+      ts: delta.ts,
+      local: delta.origin == state.origin
+    }
+
+    case result do
+      {:ok, state, outcomes} ->
+        outcomes = Enum.reverse(outcomes)
+        tally = Enum.frequencies(outcomes)
+
+        :telemetry.execute(
+          [:jido, :context, :delta, :applied],
+          %{
+            duration: duration,
+            ops: length(outcomes),
+            applied: Map.get(tally, :applied, 0),
+            superseded: Map.get(tally, :superseded, 0),
+            tombstoned: Map.get(tally, :tombstoned, 0)
+          },
+          Map.put(metadata, :outcomes, outcomes)
+        )
+
+        {:ok, state}
+
+      {:error, reason, _outcomes} ->
+        :telemetry.execute(
+          [:jido, :context, :delta, :failed],
+          %{duration: duration},
+          Map.put(metadata, :reason, reason)
+        )
+
+        {:error, reason}
+    end
   end
 
   defp apply_op(state, delta, {:put_node, key, labels, props}) do
@@ -409,11 +480,11 @@ defmodule Jido.Context.Graph do
     with {:ok, tomb} <- read_stamp(state, @tomb_label, key) do
       if tomb && Delta.compare_stamp(tomb, stamp) != :lt do
         # The node was deleted by a write that wins over this one.
-        {:ok, state}
+        {:ok, state, :tombstoned}
       else
-        with {:ok, state} <- write_node(state, delta, key, labels, props),
+        with {:ok, state, outcome} <- write_node(state, delta, key, labels, props),
              :ok <- clear_tombstone(state, key, tomb) do
-          {:ok, state}
+          {:ok, state, outcome}
         end
       end
     end
@@ -424,11 +495,12 @@ defmodule Jido.Context.Graph do
 
     with {:ok, existing} <- read_stamp(state, @node_label, key) do
       if existing && Delta.compare_stamp(existing, stamp) == :gt do
-        {:ok, state}
+        {:ok, state, :superseded}
       else
         with {:ok, _} <-
-               run(state, "MATCH (n#{label(@node_label)} #{key_match(key)}) DETACH DELETE n") do
-          write_tombstone(state, delta, key)
+               run(state, "MATCH (n#{label(@node_label)} #{key_match(key)}) DETACH DELETE n"),
+             {:ok, state} <- write_tombstone(state, delta, key) do
+          {:ok, state, :applied}
         end
       end
     end
@@ -442,13 +514,15 @@ defmodule Jido.Context.Graph do
          {:ok, existing} <- read_edge_stamp(state, from, type, to) do
       cond do
         is_nil(existing) ->
-          create_edge(state, delta, from, type, to, props)
+          with {:ok, state} <- create_edge(state, delta, from, type, to, props),
+               do: {:ok, state, :applied}
 
         Delta.compare_stamp(existing, stamp) == :lt ->
-          update_edge(state, delta, from, type, to, props)
+          with {:ok, state} <- update_edge(state, delta, from, type, to, props),
+               do: {:ok, state, :applied}
 
         true ->
-          {:ok, state}
+          {:ok, state, :superseded}
       end
     end
   end
@@ -458,10 +532,10 @@ defmodule Jido.Context.Graph do
 
     with {:ok, existing} <- read_edge_stamp(state, from, type, to) do
       if existing && Delta.compare_stamp(existing, stamp) == :gt do
-        {:ok, state}
+        {:ok, state, :superseded}
       else
         with {:ok, _} <- run(state, edge_match(from, type, to) <> " DELETE r") do
-          {:ok, state}
+          {:ok, state, :applied}
         end
       end
     end
@@ -476,7 +550,8 @@ defmodule Jido.Context.Graph do
       if existing do
         {:ok, state}
       else
-        write_node(state, delta, key, [], %{})
+        # A placeholder is bookkeeping, not a write that wins or loses.
+        with {:ok, state, _outcome} <- write_node(state, delta, key, [], %{}), do: {:ok, state}
       end
     end
   end
@@ -487,13 +562,15 @@ defmodule Jido.Context.Graph do
 
       cond do
         is_nil(existing) ->
-          create_node(state, delta, key, labels, props)
+          with {:ok, state} <- create_node(state, delta, key, labels, props),
+               do: {:ok, state, :applied}
 
         Delta.compare_stamp(existing, stamp) == :lt ->
-          update_node(state, delta, key, labels, props)
+          with {:ok, state} <- update_node(state, delta, key, labels, props),
+               do: {:ok, state, :applied}
 
         true ->
-          {:ok, state}
+          {:ok, state, :superseded}
       end
     end
   end

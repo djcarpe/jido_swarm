@@ -157,6 +157,25 @@ defmodule Jido.Context.Mesh do
     GenServer.cast(router_name(mesh), {:deliver, delta})
   end
 
+  @doc """
+  Telemetry emitted by a mesh's router.
+
+  | Event | When |
+  |---|---|
+  | `[:jido, :context, :mesh, :publish]` | a local delta was fanned out and handed to the transports |
+  | `[:jido, :context, :mesh, :deliver]` | a delta arriving over a transport was fanned out |
+  | `[:jido, :context, :mesh, :duplicate]` | a delta id already seen was dropped |
+
+  Measurements are `count: 1`, plus `ops` and `subscribers` (how many
+  processes it went to) for the first two. Metadata is `mesh`, `id`,
+  `origin`, `topic`, `seq` and `ts` — enough to count traffic per origin
+  without carrying the delta itself.
+  """
+  @spec telemetry_events() :: [[atom()]]
+  def telemetry_events do
+    for kind <- [:publish, :deliver, :duplicate], do: [:jido, :context, :mesh, kind]
+  end
+
   @doc "Is a mesh with this name running?"
   @spec alive?(atom()) :: boolean()
   def alive?(mesh), do: is_pid(Process.whereis(router_name(mesh)))
