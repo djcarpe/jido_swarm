@@ -15,6 +15,16 @@ defmodule JidoSwarm.Actions.HiveWork do
 
   Questions in the answer go to the Hive routed by skill, so a worker that is
   stuck on something outside its skills asks rather than guesses.
+
+  ## Repositories
+
+  A task that names a repository — in its title, its detail, or its key —
+  gets that repository in hand: the clone is made or refreshed, an outline
+  and its README go into the prompt, and the model may `list_files`,
+  `read_file` and `grep` it (`JidoSwarm.Repos.Tools`) as many times as it
+  needs before answering. The first round of standing surveys ran without
+  this and every agent said so, in questions and in failure notes; a survey
+  that cannot read the code is a survey of the task's own wording.
   """
 
   use Jido.Action,
@@ -29,6 +39,9 @@ defmodule JidoSwarm.Actions.HiveWork do
 
   alias JidoSwarm.Hive
   alias JidoSwarm.Reasoning
+  alias JidoSwarm.Repos
+
+  @tool_rounds 16
 
   @spec run(map(), map()) :: {:ok, map()}
   def run(params, _ctx) do
@@ -44,7 +57,24 @@ defmodule JidoSwarm.Actions.HiveWork do
         c -> c
       end
 
-    case Reasoning.ask_json(Reasoning.prompt(prompt(context)), :object, max_tokens: 4_000) do
+    repos = repos_for(task, context) |> Enum.filter(&cloned?/1)
+    messages = Reasoning.prompt(prompt(context, repos))
+
+    ask =
+      if repos == [] do
+        Reasoning.ask_json(messages, :object, max_tokens: 4_000)
+      else
+        Reasoning.ask_json_with_tools(
+          messages,
+          :object,
+          Repos.Tools.definitions(),
+          &Repos.Tools.call(&1, &2, repos),
+          max_tokens: 4_000,
+          max_rounds: @tool_rounds
+        )
+      end
+
+    case ask do
       {:ok, answer, _result} ->
         apply_answer(me, task, answer)
 
@@ -110,6 +140,38 @@ defmodule JidoSwarm.Actions.HiveWork do
 
   # Only items that actually say something: `Reasoning.items/2` is lenient
   # about shape, and a model may omit a list or fill it with fragments.
+  defp repo_brief([]), do: ""
+
+  defp repo_brief(repos) do
+    briefs =
+      Enum.map_join(repos, "\n\n", fn repo ->
+        readme =
+          case Repos.read_file(repo, "README.md", 3_000) do
+            {:ok, text} -> "README.md:\n" <> Reasoning.clamp(text, 3_000)
+            _ -> "(no README.md)"
+          end
+
+        """
+        ### #{repo.name} — checked out at #{Repos.path(repo)}
+        #{Reasoning.clamp(Repos.outline(repo, 80), 2_000)}
+
+        #{readme}
+        """
+      end)
+
+    """
+
+    ## Repositories in hand
+
+    You have these repositories on disk and three tools to read them: list_files,
+    read_file and grep, each taking the repository name. Use them — read the code
+    before you write an insight about it, and cite paths in what you record. Do
+    not ask how to reach the repository; you have it.
+
+    #{briefs}
+    """
+  end
+
   defp with_text(answer, key) do
     case Map.get(answer, key) do
       list when is_list(list) ->
@@ -120,12 +182,43 @@ defmodule JidoSwarm.Actions.HiveWork do
     end
   end
 
-  defp prompt(context) do
+  @doc false
+  # The repositories a task is about: named in its key (the steward's
+  # `task:standing:<repo>:<n>`), its title or its detail, or as `repo:<name>`
+  # anywhere in the context pack. Public for tests.
+  @spec repos_for(String.t(), String.t()) :: [Repos.repo()]
+  def repos_for(task_key, context) do
+    haystack = String.downcase(task_key <> "\n" <> context)
+
+    Repos.all()
+    |> Enum.filter(fn repo ->
+      name = String.downcase(repo.name)
+
+      String.starts_with?(task_key, "task:standing:#{repo.name}:") or
+        String.contains?(haystack, "repo:#{name}") or
+        Regex.match?(~r/(^|[^a-z0-9_])#{Regex.escape(name)}([^a-z0-9_]|$)/, haystack)
+    end)
+  end
+
+  defp cloned?(repo) do
+    case Repos.ensure_cloned(repo) do
+      {:ok, _} ->
+        true
+
+      {:error, reason} ->
+        require Logger
+        Logger.warning("hive work: could not clone #{repo.name}: #{inspect(reason)}")
+        false
+    end
+  end
+
+  defp prompt(context, repos) do
     """
     You have claimed the task below from the swarm's shared board. Everything the
     swarm knows that bears on it is included: read it before you decide.
 
     #{Reasoning.clamp(context, 14_000)}
+    #{repo_brief(repos)}
 
     Do the task as far as you can with what you know, then answer with ONE JSON object:
 

@@ -223,6 +223,17 @@ failed, the next tick opens the next round. Keys are deterministic
 (`task:standing:<repo>:<round>`), so two pods seeding at once converge on one
 board instead of two.
 
+### Repositories in hand
+
+A task that names a repository — in its key, title or detail, or as
+`repo:<name>` anywhere in its pack — gets the clone made or refreshed, an
+outline and README in the prompt, and three read-only tools for the rest:
+`list_files`, `read_file` (numbered lines, windows) and `grep`
+(`JidoSwarm.Repos.Tools`). The model reads until it is ready, up to sixteen
+rounds, then answers; every path is contained to the clone. Without this the
+first standing round produced questions about how to reach the code, not
+facts about it.
+
 ## Seeing the mesh
 
 "Replicated to every pod" is a claim; the Hive tab of the console makes it

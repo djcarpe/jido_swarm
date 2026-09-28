@@ -99,4 +99,98 @@ defmodule JidoSwarm.ReasoningTest do
       assert Reasoning.clamp(nil, 10) == ""
     end
   end
+
+  describe "ask_json_with_tools/5" do
+    # A provider that reads one file, then answers with what it read.
+    defmodule ToolProvider do
+      @behaviour JidoSwarm.LLM
+
+      @impl true
+      def ready?, do: true
+      @impl true
+      def readiness_hint, do: ""
+
+      @impl true
+      def chat(messages, opts) do
+        tools = Keyword.get(opts, :tools, [])
+        tool_results = for %{role: :tool} = m <- messages, do: m.content
+
+        cond do
+          tools != [] and tool_results == [] ->
+            {:ok,
+             %{
+               text: "",
+               tool_calls: [%{id: "call_1", name: "read_file", arguments: %{"path" => "mix.exs"}}],
+               stop: :tool_use,
+               raw: nil,
+               usage: %{}
+             }}
+
+          true ->
+            {:ok,
+             %{
+               text:
+                 ~s({"saw": #{JSON.encode!(List.first(tool_results) || "nothing")}, "rounds": #{length(tool_results)}}),
+               tool_calls: [],
+               stop: :end_turn,
+               raw: nil,
+               usage: %{}
+             }}
+        end
+      end
+    end
+
+    test "tool results go back to the model and the final JSON comes out" do
+      executor = fn "read_file", %{"path" => path} -> "contents of #{path}" end
+      tools = [%{name: "read_file", description: "", schema: %{}}]
+
+      assert {:ok, %{"saw" => "contents of mix.exs", "rounds" => 1}, _} =
+               JidoSwarm.Reasoning.ask_json_with_tools(
+                 [%{role: :user, content: "go"}],
+                 :object,
+                 tools,
+                 executor,
+                 provider: ToolProvider
+               )
+    end
+
+    test "a model that keeps calling tools is cut off and made to answer" do
+      # Always calls a tool while tools are offered; answers once they are not.
+      defmodule Greedy do
+        @behaviour JidoSwarm.LLM
+        @impl true
+        def ready?, do: true
+        @impl true
+        def readiness_hint, do: ""
+        @impl true
+        def chat(messages, opts) do
+          if Keyword.get(opts, :tools, []) != [] do
+            {:ok,
+             %{
+               text: "",
+               tool_calls: [%{id: "c", name: "grep", arguments: %{}}],
+               stop: :tool_use,
+               raw: nil,
+               usage: %{}
+             }}
+          else
+            n = Enum.count(messages, &(&1.role == :tool))
+
+            {:ok,
+             %{text: ~s({"rounds": #{n}}), tool_calls: [], stop: :end_turn, raw: nil, usage: %{}}}
+          end
+        end
+      end
+
+      assert {:ok, %{"rounds" => 3}, _} =
+               JidoSwarm.Reasoning.ask_json_with_tools(
+                 [%{role: :user, content: "go"}],
+                 :object,
+                 [%{name: "grep", description: "", schema: %{}}],
+                 fn _, _ -> "match" end,
+                 provider: Greedy,
+                 max_rounds: 3
+               )
+    end
+  end
 end

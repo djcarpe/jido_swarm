@@ -42,6 +42,67 @@ defmodule JidoSwarm.Reasoning do
   end
 
   @doc """
+  Like `ask_json/3`, but the model may call tools on the way to its answer.
+
+  Each round sends the conversation with `tools`; if the model calls any,
+  `executor.(name, arguments)` runs each one and its text goes back as a tool
+  result, and the loop continues. It ends when the model answers without
+  calling a tool, or after `:max_rounds` (default #{12}) rounds — a model
+  that reads forever is cut off and asked for its answer from what it has.
+  Returns the JSON in the final answer, and the last result.
+  """
+  @spec ask_json_with_tools(
+          [LLM.message()],
+          :object | :list,
+          [LLM.tool()],
+          (String.t(), map() -> String.t()),
+          keyword()
+        ) :: {:ok, term(), LLM.result()} | {:error, term()}
+  def ask_json_with_tools(messages, expect, tools, executor, opts \\ []) do
+    {max_rounds, opts} = Keyword.pop(opts, :max_rounds, 12)
+    loop_tools(messages, expect, tools, executor, opts, max_rounds)
+  end
+
+  defp loop_tools(messages, expect, tools, executor, opts, rounds_left) do
+    tool_opts = if rounds_left > 0, do: Keyword.put(opts, :tools, tools), else: opts
+
+    case LLM.chat(messages, tool_opts) do
+      {:ok, %{tool_calls: [_ | _] = calls} = result} when rounds_left > 0 ->
+        results =
+          Enum.map(calls, fn call ->
+            LLM.tool_message(call, executor.(call.name, call.arguments || %{}))
+          end)
+
+        next = messages ++ [LLM.assistant_message(result)] ++ results
+
+        # The last round goes out without tools, so the model must answer.
+        next =
+          if rounds_left == 1,
+            do:
+              next ++
+                [
+                  %{
+                    role: :user,
+                    content:
+                      "You have used every tool call available. Answer now with the JSON object from what you have read."
+                  }
+                ],
+            else: next
+
+        loop_tools(next, expect, tools, executor, opts, rounds_left - 1)
+
+      {:ok, result} ->
+        case extract_json(result.text || "", expect) do
+          {:ok, value} -> {:ok, value, result}
+          :error -> {:error, {:unparseable, result.text}}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
   Pulls the first JSON value out of model output.
 
   Models wrap JSON in prose, in ```json fences, or in both. This tries, in
