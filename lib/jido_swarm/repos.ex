@@ -286,8 +286,19 @@ defmodule JidoSwarm.Repos do
 
     if dirty?(repo) do
       with {:ok, _} <- git(["add", "-A"], cd: dest),
-           {:ok, _} <- git(["-c", "user.name=#{git_user()}", "-c", "user.email=#{git_email()}",
-                            "commit", "-m", message], cd: dest),
+           {:ok, _} <-
+             git(
+               [
+                 "-c",
+                 "user.name=#{git_user()}",
+                 "-c",
+                 "user.email=#{git_email()}",
+                 "commit",
+                 "-m",
+                 message
+               ],
+               cd: dest
+             ),
            {:ok, sha} <- git(["rev-parse", "HEAD"], cd: dest) do
         {:ok, String.trim(sha)}
       end
@@ -432,8 +443,11 @@ defmodule JidoSwarm.Repos do
 
   defp push_url(%{url: url} = repo) do
     case {token(), repo_slug(repo)} do
-      {token, {:ok, slug}} when is_binary(token) -> "https://x-access-token:#{token}@github.com/#{slug}.git"
-      _ -> https_url(url)
+      {token, {:ok, slug}} when is_binary(token) ->
+        "https://x-access-token:#{token}@github.com/#{slug}.git"
+
+      _ ->
+        https_url(url)
     end
   end
 

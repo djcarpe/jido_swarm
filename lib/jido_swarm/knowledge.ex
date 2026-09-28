@@ -37,8 +37,9 @@ defmodule JidoSwarm.Knowledge do
   | `knowledge.attempts` | implementation and PR state |
   | `context.chat` | the operator conversation |
 
-  A worker subscribes to `knowledge.**` so it inherits everything the swarm
-  knows, and the web layer subscribes to everything so the UI can react.
+  Every pod's graph subscribes to `knowledge.**`, `context.**` and `hive.**`,
+  so it holds everything the swarm knows; `JidoSwarm.Hive.Feed` watches the
+  same traffic and tells the console when something changed.
   """
 
   alias Jido.Context

@@ -62,7 +62,9 @@ defmodule JidoSwarm.MCP.Tools do
           },
           ["name"]
         ),
-        &join/2, write: true),
+        &join/2,
+        write: true
+      ),
       tool(
         "hive_board",
         "The board at a glance: goals and progress, tasks in flight and who holds them, the best open tasks, open questions, recent insights, active agents.",
@@ -73,7 +75,9 @@ defmodule JidoSwarm.MCP.Tools do
         "hive_next_task",
         "Pick the best open task for you, claim it, and get its context pack. Returns nothing to do if the board is empty for your skills.",
         obj(Map.merge(agent_param(), %{"skills" => @strs})),
-        &next_task/2, write: true),
+        &next_task/2,
+        write: true
+      ),
       tool(
         "hive_ranked",
         "Open tasks ranked for you, with the score and the reasons, without claiming anything.",
@@ -93,12 +97,16 @@ defmodule JidoSwarm.MCP.Tools do
         "hive_claim",
         "Claim a specific task (lease 5 minutes; renew with hive_progress).",
         obj(Map.merge(agent_param(), %{"task" => @str}), ["task"]),
-        &claim/2, write: true),
+        &claim/2,
+        write: true
+      ),
       tool(
         "hive_progress",
         "Report progress on a task you hold. Renews your lease — keep calling it while you work.",
         obj(Map.merge(agent_param(), %{"task" => @str, "note" => @str}), ["task", "note"]),
-        &progress/2, write: true),
+        &progress/2,
+        write: true
+      ),
       tool(
         "hive_finish",
         "Complete a task you hold, recording a summary and what came out of it.",
@@ -118,17 +126,23 @@ defmodule JidoSwarm.MCP.Tools do
           }),
           ["task", "summary"]
         ),
-        &finish/2, write: true),
+        &finish/2,
+        write: true
+      ),
       tool(
         "hive_fail",
         "Give up on a task you hold, saying why. It reopens for others (up to 3 attempts).",
         obj(Map.merge(agent_param(), %{"task" => @str, "reason" => @str}), ["task", "reason"]),
-        &fail/2, write: true),
+        &fail/2,
+        write: true
+      ),
       tool(
         "hive_handoff",
         "Release a task you hold with a note for whoever picks it up next: what is done, what is left, what to watch out for.",
         obj(Map.merge(agent_param(), %{"task" => @str, "note" => @str}), ["task", "note"]),
-        &handoff/2, write: true),
+        &handoff/2,
+        write: true
+      ),
       tool(
         "hive_add_goal",
         "Add a top-level goal for the swarm to organise around.",
@@ -140,7 +154,9 @@ defmodule JidoSwarm.MCP.Tools do
           }),
           ["title"]
         ),
-        &add_goal/2, write: true),
+        &add_goal/2,
+        write: true
+      ),
       tool(
         "hive_add_task",
         "Add a task under a goal or a parent task. depends_on lists task keys that must be done first; skills route it to the right agents.",
@@ -157,7 +173,9 @@ defmodule JidoSwarm.MCP.Tools do
           }),
           ["title"]
         ),
-        &add_task/2, write: true),
+        &add_task/2,
+        write: true
+      ),
       tool(
         "hive_decompose",
         "Split a task that is too big into subtasks. A subtask can depend on an earlier one by index (depends_on: [0]). The parent completes when all subtasks do.",
@@ -182,7 +200,9 @@ defmodule JidoSwarm.MCP.Tools do
           }),
           ["task", "subtasks"]
         ),
-        &decompose/2, write: true),
+        &decompose/2,
+        write: true
+      ),
       tool(
         "hive_share",
         "Share an insight with the swarm: a fact, finding, hypothesis, risk, idea or summary, with a confidence. Link it to what it is about, what it supports or contradicts.",
@@ -196,31 +216,41 @@ defmodule JidoSwarm.MCP.Tools do
           ),
           ["text"]
         ),
-        &share/2, write: true),
+        &share/2,
+        write: true
+      ),
       tool(
         "hive_endorse",
         "Endorse (+1) or dispute (-1) an insight. One vote per agent.",
         obj(Map.merge(agent_param(), %{"insight" => @str, "weight" => @int}), ["insight"]),
-        &endorse/2, write: true),
+        &endorse/2,
+        write: true
+      ),
       tool(
         "hive_ask",
         "Ask the swarm a question, routed to agents with the given skills and tied to a task if relevant.",
         obj(Map.merge(agent_param(), %{"text" => @str, "skills" => @strs, "about" => @strs}), [
           "text"
         ]),
-        &ask/2, write: true),
+        &ask/2,
+        write: true
+      ),
       tool(
         "hive_answer",
         "Answer a question.",
         obj(Map.merge(agent_param(), %{"question" => @str, "text" => @str}), ["question", "text"]),
-        &answer/2, write: true),
+        &answer/2,
+        write: true
+      ),
       tool(
         "hive_decide",
         "Record a decision and its rationale, so the swarm stops relitigating it.",
         obj(Map.merge(agent_param(), %{"text" => @str, "rationale" => @str, "about" => @strs}), [
           "text"
         ]),
-        &decide/2, write: true),
+        &decide/2,
+        write: true
+      ),
       tool(
         "hive_artifact",
         "Record something a task produced: a file, PR, document or URL.",
@@ -233,12 +263,16 @@ defmodule JidoSwarm.MCP.Tools do
           }),
           ["task", "uri"]
         ),
-        &artifact/2, write: true),
+        &artifact/2,
+        write: true
+      ),
       tool(
         "hive_message",
         "Message one agent (to: agent id), everyone with a skill (to: \"skill:rust\"), or everyone (to: \"*\").",
         obj(Map.merge(agent_param(), %{"to" => @str, "text" => @str}), ["to", "text"]),
-        &message/2, write: true),
+        &message/2,
+        write: true
+      ),
       tool(
         "hive_inbox",
         "Your messages, open questions you could answer, and leases about to run out.",
@@ -249,7 +283,9 @@ defmodule JidoSwarm.MCP.Tools do
         "hive_heartbeat",
         "Tell the swarm you are still here, with an optional status line.",
         obj(Map.merge(agent_param(), %{"status" => @str})),
-        &heartbeat/2, write: true),
+        &heartbeat/2,
+        write: true
+      ),
       tool(
         "hive_search",
         "Find tasks, goals, insights, questions and decisions by words.",

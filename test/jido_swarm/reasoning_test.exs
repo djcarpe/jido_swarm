@@ -73,7 +73,8 @@ defmodule JidoSwarm.ReasoningTest do
     end
 
     test "drops non-map entries rather than passing them on" do
-      assert [%{"a" => 1}] = Reasoning.items(%{"findings" => [%{"a" => 1}, "junk", 3]}, "findings")
+      assert [%{"a" => 1}] =
+               Reasoning.items(%{"findings" => [%{"a" => 1}, "junk", 3]}, "findings")
     end
 
     test "is empty for an empty map or a non-collection" do

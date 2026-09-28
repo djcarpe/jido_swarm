@@ -7,10 +7,14 @@ defmodule JidoSwarmWeb.ChatLive do
 
   * **The queue** broadcasts on the `"swarm"` PubSub topic whenever a job is
     enqueued or completed, so pool activity appears immediately.
-  * **The knowledge graph** has no change feed of its own here — findings arrive
-    from other nodes over the mesh, not through this process — so it is
-    re-read on a timer. A poll is the honest mechanism for something that can
-    change without this node being involved.
+  * **The knowledge graph** changes without this process being involved —
+    findings arrive from other nodes over the mesh — so the older panes are
+    re-read on a timer.
+  * **The Hive board** is read when the graph changes: `JidoSwarm.Hive.Feed`
+    rebroadcasts every mesh delta on the `"hive"` PubSub topic, and a delta on
+    a Hive topic schedules one re-read, debounced so a burst of writes is one
+    render. A slow tick remains because a task's status is partly a matter of
+    time — a lease expires without any delta being written.
   """
 
   use JidoSwarmWeb, :live_view
@@ -19,12 +23,16 @@ defmodule JidoSwarmWeb.ChatLive do
   alias JidoSwarm.Swarm
 
   @refresh_interval 2_000
+  @hive_debounce 500
+  @hive_tick 10_000
 
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(JidoSwarm.PubSub, "swarm")
+      Phoenix.PubSub.subscribe(JidoSwarm.PubSub, "hive")
       :timer.send_interval(@refresh_interval, self(), :refresh)
+      :timer.send_interval(@hive_tick, self(), :hive_tick)
     end
 
     {:ok,
@@ -32,7 +40,9 @@ defmodule JidoSwarmWeb.ChatLive do
      |> assign(:pending_reply, nil)
      |> assign(:composer, "")
      |> assign(:tab, :findings)
-     |> load()}
+     |> assign(:hive_refresh_pending?, false)
+     |> load()
+     |> load_hive()}
   end
 
   # ===========================================================================
@@ -118,7 +128,7 @@ defmodule JidoSwarmWeb.ChatLive do
             created_by: "operator"
           })
 
-        {:noreply, socket |> put_flash(:info, "Goal added to the board.") |> load()}
+        {:noreply, socket |> put_flash(:info, "Goal added to the board.") |> load_hive()}
     end
   end
 
@@ -139,7 +149,7 @@ defmodule JidoSwarmWeb.ChatLive do
           })
 
         {:noreply,
-         socket |> put_flash(:info, "Task added. An idle agent will pick it up.") |> load()}
+         socket |> put_flash(:info, "Task added. An idle agent will pick it up.") |> load_hive()}
     end
   end
 
@@ -186,7 +196,29 @@ defmodule JidoSwarmWeb.ChatLive do
 
   def handle_info({:swarm_event, _event}, socket), do: {:noreply, load(socket)}
   def handle_info(:refresh, socket), do: {:noreply, load(socket)}
+
+  # A change to the board, from anywhere in the mesh. One re-read per burst:
+  # the first delta starts the clock, the rest ride along.
+  def handle_info({:hive_delta, %{topic: "hive." <> _}}, socket) do
+    {:noreply, schedule_hive_refresh(socket)}
+  end
+
+  def handle_info({:hive_delta, _entry}, socket), do: {:noreply, socket}
+  def handle_info({:hive_burst, _count}, socket), do: {:noreply, schedule_hive_refresh(socket)}
+
+  def handle_info(:hive_refresh, socket) do
+    {:noreply, socket |> assign(:hive_refresh_pending?, false) |> load_hive()}
+  end
+
+  def handle_info(:hive_tick, socket), do: {:noreply, load_hive(socket)}
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  defp schedule_hive_refresh(%{assigns: %{hive_refresh_pending?: true}} = socket), do: socket
+
+  defp schedule_hive_refresh(socket) do
+    Process.send_after(self(), :hive_refresh, @hive_debounce)
+    assign(socket, :hive_refresh_pending?, true)
+  end
 
   # ===========================================================================
   # Loading
@@ -206,12 +238,16 @@ defmodule JidoSwarmWeb.ChatLive do
     |> assign(:attempts, if(graph_available?, do: Knowledge.attempts(graph), else: []))
     |> assign(:repos, JidoSwarm.Repos.all())
     |> assign(:glider, JidoSwarm.GliderMetrics.snapshot())
-    |> assign(:hive, if(graph_available?, do: hive_digest(), else: empty_hive()))
     |> assign_turns(graph_available?, graph)
   end
 
-  # The board is read like the rest of the graph: on the refresh timer, because
-  # other pods and MCP agents change it without this process being involved.
+  # The board is read on its own schedule — when the feed says it changed, and
+  # slowly otherwise for leases running out — so it lives outside `load/1`.
+  defp load_hive(socket) do
+    hive = if JidoSwarm.graph_available?(), do: hive_digest(), else: empty_hive()
+    assign(socket, :hive, hive)
+  end
+
   defp hive_digest do
     JidoSwarm.Hive.digest(limit: 12)
   rescue

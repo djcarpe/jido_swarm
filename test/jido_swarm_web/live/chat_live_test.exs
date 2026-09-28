@@ -57,6 +57,18 @@ defmodule JidoSwarmWeb.ChatLiveTest do
       assert task.created_by == "operator"
     end
 
+    test "a board change made elsewhere reaches the Hive tab through the feed", %{conn: conn} do
+      tag = System.unique_integer([:positive])
+      {:ok, view, _html} = live(conn, ~p"/")
+      view |> element("button", "Hive") |> render_click()
+
+      # Not through the form: an agent on another pod would write the same way,
+      # and the console learns of it from the feed, not from a timer.
+      {:ok, _} = JidoSwarm.Hive.add_goal(%{title: "Remote goal #{tag}", created_by: "agent"})
+
+      assert eventually(fn -> render(view) =~ "Remote goal #{tag}" end)
+    end
+
     test "the Glider tab reports instrumentation", %{conn: conn} do
       JidoSwarm.GliderMetrics.reset()
       {:ok, view, _html} = live(conn, ~p"/")
@@ -138,6 +150,21 @@ defmodule JidoSwarmWeb.ChatLiveTest do
       render_submit(element(view, "form"), %{"message" => "   "})
 
       assert JidoSwarm.Swarm.Queue.stats().pending == before.pending
+    end
+  end
+
+  # The board refresh is debounced, so give the feed and the timer a moment.
+  defp eventually(fun, tries \\ 20) do
+    cond do
+      fun.() ->
+        true
+
+      tries == 0 ->
+        false
+
+      true ->
+        Process.sleep(100)
+        eventually(fun, tries - 1)
     end
   end
 end

@@ -12,8 +12,15 @@ defmodule JidoSwarm.ReposTest do
 
   setup do
     root = Path.join(System.tmp_dir!(), "swarm_repos_test_#{System.unique_integer([:positive])}")
-    repo = %{name: "demo", url: nil, source: nil, default_branch: "main", test_command: "true",
-             description: ""}
+
+    repo = %{
+      name: "demo",
+      url: nil,
+      source: nil,
+      default_branch: "main",
+      test_command: "true",
+      description: ""
+    }
 
     File.mkdir_p!(Path.join(root, "demo"))
     previous = Application.get_env(:jido_swarm, Repos, [])
@@ -88,7 +95,8 @@ defmodule JidoSwarm.ReposTest do
     end
 
     test "parses an ssh URL" do
-      assert {:ok, "djcarpe/glider"} = Repos.repo_slug(%{url: "git@github.com:djcarpe/glider.git"})
+      assert {:ok, "djcarpe/glider"} =
+               Repos.repo_slug(%{url: "git@github.com:djcarpe/glider.git"})
     end
 
     test "is :error without a URL" do

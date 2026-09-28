@@ -131,7 +131,9 @@ defmodule JidoSwarm.LLM do
   Surfaced in the UI so it is obvious which model the swarm is actually on, and
   why the other one is not available.
   """
-  @spec providers() :: [%{module: module(), name: String.t(), ready?: boolean(), hint: String.t()}]
+  @spec providers() :: [
+          %{module: module(), name: String.t(), ready?: boolean(), hint: String.t()}
+        ]
   def providers do
     for mod <- [JidoSwarm.LLM.Ollama, JidoSwarm.LLM.Anthropic] do
       %{

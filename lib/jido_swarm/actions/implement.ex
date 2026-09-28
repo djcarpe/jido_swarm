@@ -270,7 +270,14 @@ defmodule JidoSwarm.Actions.Implement do
         {:ok, output}
 
       {:error, {status, output}} ->
-        note(graph, attempt, "tests_failed", repo, branch, "exit #{inspect(status)}\n#{tail(output)}")
+        note(
+          graph,
+          attempt,
+          "tests_failed",
+          repo,
+          branch,
+          "exit #{inspect(status)}\n#{tail(output)}"
+        )
 
         if params.require_green_tests do
           {:error, {:tests_failed, status}}
@@ -301,7 +308,8 @@ defmodule JidoSwarm.Actions.Implement do
     if Repos.can_publish?() do
       with {:ok, _} <- Repos.push(repo, branch),
            :ok <- note(graph, attempt, "pushed", repo, branch, ""),
-           {:ok, url} <- Repos.open_pr(repo, branch, proposal.title, pr_body(proposal, test_output)) do
+           {:ok, url} <-
+             Repos.open_pr(repo, branch, proposal.title, pr_body(proposal, test_output)) do
         Knowledge.update_attempt(graph, attempt, %{
           status: "pr_opened",
           branch: branch,
@@ -315,7 +323,9 @@ defmodule JidoSwarm.Actions.Implement do
       else
         {:error, reason} ->
           note(graph, attempt, "publish_failed", repo, branch, inspect(reason))
-          {:ok, %{attempt: attempt, status: "publish_failed", branch: branch, error: inspect(reason)}}
+
+          {:ok,
+           %{attempt: attempt, status: "publish_failed", branch: branch, error: inspect(reason)}}
       end
     else
       note(graph, attempt, "committed_not_pushed", repo, branch, Repos.publish_hint())

@@ -104,7 +104,8 @@ defmodule JidoSwarm.Reasoning do
 
   defp scan_balanced(graphemes, open, close) do
     {acc, depth, _in_string?, _escaped?} =
-      Enum.reduce_while(graphemes, {[], 0, false, false}, fn char, {acc, depth, in_string?, escaped?} ->
+      Enum.reduce_while(graphemes, {[], 0, false, false}, fn char,
+                                                             {acc, depth, in_string?, escaped?} ->
         acc = [char | acc]
 
         cond do
