@@ -40,6 +40,17 @@ defmodule JidoSwarm.GliderMetricsTest do
     assert snapshot.totals.busy_us > 0
   end
 
+  test "the engine's own report is kept: page cache and time inside the engine", %{graph: graph} do
+    for i <- 1..5, do: {:ok, _} = Context.assert(graph, "e:#{i}", ["E"], %{"v" => i})
+    {:ok, _} = Context.query(graph, "MATCH (e:E) RETURN e.v")
+
+    engine = GliderMetrics.snapshot().engine
+    assert engine.statements >= 6
+    assert engine.page_hits > 0
+    assert engine.cache_hit_rate > 0
+    assert engine.engine_us >= 0
+  end
+
   test "latency percentiles are populated and ordered", %{graph: graph} do
     for i <- 1..40, do: {:ok, _} = Context.assert(graph, "p:#{i}", ["P"], %{"v" => i})
 

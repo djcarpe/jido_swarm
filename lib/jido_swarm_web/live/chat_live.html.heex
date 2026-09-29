@@ -471,6 +471,28 @@
                 </div>
               </div>
 
+              <%!-- The engine's own report: is the graph cold, or just busy? --%>
+              <div :if={@glider.engine.statements > 0} class="grid grid-cols-2 gap-2 text-xs">
+                <div
+                  class="bg-base-200 rounded p-2"
+                  title={"#{format_count(@glider.engine.page_hits)} pages from cache, #{format_count(@glider.engine.page_misses)} from storage"}
+                >
+                  <div class="opacity-60">Page cache</div>
+                  <div class="text-lg font-mono">
+                    {if @glider.engine.cache_hit_rate,
+                      do: "#{@glider.engine.cache_hit_rate}%",
+                      else: "—"}
+                  </div>
+                </div>
+                <div
+                  class="bg-base-200 rounded p-2"
+                  title={"#{format_us(@glider.engine.boundary_us)} crossing the NIF and building results"}
+                >
+                  <div class="opacity-60">Inside the engine</div>
+                  <div class="text-lg font-mono">{format_us(@glider.engine.engine_us)}</div>
+                </div>
+              </div>
+
               <div :if={@glider.totals.errors > 0} class="alert alert-error p-2 text-xs">
                 <span>
                   {@glider.totals.errors} failed

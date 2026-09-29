@@ -6,6 +6,12 @@ defmodule JidoSwarm.GliderMetrics do
   rolling picture in ETS: per-operation counts, latency distribution, error
   rate, throughput, and a recent time series.
 
+  It also listens to glider_ex's own `[:glider, :query, :stop]`, which carries
+  the engine's report on every statement — what no wrapper can see from the
+  outside: page-cache hits and misses, pages read and written, and the time
+  spent inside the engine as distinct from crossing the NIF boundary. That is
+  the difference between "the graph is slow" and "the graph is cold".
+
   ## Why percentiles and not an average
 
   Graph work is bimodal — an indexed lookup is microseconds and a `CALL
@@ -43,6 +49,11 @@ defmodule JidoSwarm.GliderMetrics do
   @series_window 300
 
   @handler_id "jido-swarm-glider-metrics"
+  @engine_handler_id "jido-swarm-glider-engine-metrics"
+
+  # The engine's report, per statement (glider_ex).
+  @engine_event [:glider, :query, :stop]
+  @engine_counters [:page_hits, :page_misses, :page_reads, :page_writes]
 
   @operations [:open, :query, :run, :import, :export, :checkpoint, :stats]
 
@@ -71,12 +82,16 @@ defmodule JidoSwarm.GliderMetrics do
   def attach do
     _ = :telemetry.detach(@handler_id)
 
-    :telemetry.attach_many(
-      @handler_id,
-      Glider.telemetry_events(),
-      &__MODULE__.handle_event/4,
-      nil
-    )
+    :ok =
+      :telemetry.attach_many(
+        @handler_id,
+        Glider.telemetry_events(),
+        &__MODULE__.handle_event/4,
+        nil
+      )
+
+    _ = :telemetry.detach(@engine_handler_id)
+    :telemetry.attach(@engine_handler_id, @engine_event, &__MODULE__.handle_event/4, nil)
   end
 
   @impl true
@@ -113,6 +128,30 @@ defmodule JidoSwarm.GliderMetrics do
     if keyword = Map.get(metadata, :operation), do: bump({:cypher, keyword, result})
 
     record_series(op, result, duration_us)
+    :ok
+  end
+
+  # glider_ex's per-statement event. Counted apart from the operations above:
+  # every jido :query/:run is one of these underneath, so folding them in
+  # would count each statement twice.
+  def handle_event(@engine_event, measurements, _metadata, _config) do
+    bump({:engine, :statements})
+
+    for key <- @engine_counters, n = Map.get(measurements, key), is_integer(n), n > 0 do
+      bump({:engine, key}, n)
+    end
+
+    # Inside the engine vs. the whole call; the gap is the NIF boundary and
+    # building result terms.
+    if engine = Map.get(measurements, :engine_duration) do
+      bump({:engine, :engine_us}, System.convert_time_unit(engine, :native, :microsecond))
+
+      bump(
+        {:engine, :call_us},
+        System.convert_time_unit(measurements.duration, :native, :microsecond)
+      )
+    end
+
     :ok
   end
 
@@ -195,12 +234,46 @@ defmodule JidoSwarm.GliderMetrics do
         touched: Enum.sum(Enum.map(operations, & &1.touched)),
         busy_us: Enum.sum(Enum.map(operations, & &1.total_us))
       },
+      engine: engine_stats(),
       series: series(),
       window_seconds: @series_window,
       sample_limit: @sample_limit
     }
   rescue
     ArgumentError -> empty_snapshot()
+  end
+
+  # The engine's own view, from glider_ex's per-statement reports.
+  defp engine_stats do
+    hits = counter({:engine, :page_hits})
+    misses = counter({:engine, :page_misses})
+    engine_us = counter({:engine, :engine_us})
+    call_us = counter({:engine, :call_us})
+
+    %{
+      statements: counter({:engine, :statements}),
+      page_hits: hits,
+      page_misses: misses,
+      page_reads: counter({:engine, :page_reads}),
+      page_writes: counter({:engine, :page_writes}),
+      # nil rather than 0% or 100% when nothing touched a page.
+      cache_hit_rate: if(hits + misses > 0, do: Float.round(hits / (hits + misses) * 100, 1)),
+      engine_us: engine_us,
+      boundary_us: max(call_us - engine_us, 0)
+    }
+  end
+
+  defp empty_engine do
+    %{
+      statements: 0,
+      page_hits: 0,
+      page_misses: 0,
+      page_reads: 0,
+      page_writes: 0,
+      cache_hit_rate: nil,
+      engine_us: 0,
+      boundary_us: 0
+    }
   end
 
   @doc "An empty snapshot, for before the table exists."
@@ -210,6 +283,7 @@ defmodule JidoSwarm.GliderMetrics do
       operations: [],
       cypher: [],
       totals: %{calls: 0, errors: 0, error_rate: 0.0, rows: 0, touched: 0, busy_us: 0},
+      engine: empty_engine(),
       series: [],
       window_seconds: @series_window,
       sample_limit: @sample_limit

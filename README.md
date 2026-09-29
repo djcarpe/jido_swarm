@@ -206,6 +206,13 @@ for `open`, `query`, `run`, `import`, `export`, `checkpoint` and `stats`.
 | Errors | per operation and overall, as a rate |
 | Throughput | operations per second over the last five minutes |
 | Shape | calls grouped by Cypher keyword |
+| Engine | page-cache hit rate, pages read and written, time inside the engine vs. crossing the NIF |
+
+The **Engine** row comes from glider_ex's own `[:glider, :query, :stop]`,
+which carries the engine's report on each statement: what no wrapper can see
+from outside. It separates "the graph is slow" from "the graph is cold". Only
+its measurements are kept. That event's metadata includes the statement text,
+which the collector never reads.
 
 Three decisions worth knowing:
 
