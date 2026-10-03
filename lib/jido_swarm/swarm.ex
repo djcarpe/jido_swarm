@@ -62,10 +62,11 @@ defmodule JidoSwarm.Swarm do
 
   @doc """
   Queues a chat turn, replying to `reply_to` with `{:swarm_reply, job_id, result}`.
+  `model:` names the model for this turn (`PROVIDER/MODEL` on ragentic).
   """
-  @spec chat(String.t(), pid()) :: {:ok, Job.t()}
-  def chat(prompt, reply_to \\ self()) do
-    Queue.enqueue(Job.new(:chat, prompt: prompt, reply_to: reply_to))
+  @spec chat(String.t(), pid(), keyword()) :: {:ok, Job.t()}
+  def chat(prompt, reply_to \\ self(), opts \\ []) do
+    Queue.enqueue(Job.new(:chat, prompt: prompt, reply_to: reply_to, model: opts[:model]))
   end
 
   @doc """

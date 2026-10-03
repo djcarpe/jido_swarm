@@ -12,8 +12,15 @@ data:
   # pulls rather than GitHub pushing.
   DEPLOY_IMAGE: "ghcr.io/djcarpe/jido_swarm:latest"
 
-  # Claude. The key itself lives in the Secret, never here.
-  LLM_PROVIDER: "anthropic"
+  # ragentic's model gateway: every provider registered there (the
+  # workstation's relayed Ollama, DeepSeek, OpenAI, Anthropic…) as
+  # PROVIDER/MODEL, with the credentials kept in ragentic. RAGENTIC_TOKEN
+  # (an API key with the api scope) lives in the Secret. The in-cluster
+  # Service URL needs no TLS or CA; from outside use https://ragentic.home
+  # with RAGENTIC_CACERT. "anthropic" and "ollama" still work as before.
+  LLM_PROVIDER: "ragentic"
+  RAGENTIC_URL: "http://ragentic.ragentic.svc.cluster.local"
+  RAGENTIC_MODEL: "dj-laptop/qwen3:4b-instruct"
   OLLAMA_BASE_URL: "http://ollama-external.jido-swarm.svc.cluster.local:11434"
   OLLAMA_MODEL: "qwen3:4b-instruct"
   # Ollama defaults to a 4096-token window regardless of what the model

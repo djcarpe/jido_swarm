@@ -281,6 +281,7 @@ defmodule JidoSwarm.LLM.Anthropic do
 
   @doc "The configured default model."
   @spec model() :: String.t()
+  @impl true
   def model do
     JidoSwarm.LLM.provider_config(:anthropic) |> Keyword.get(:model, @default_model)
   end

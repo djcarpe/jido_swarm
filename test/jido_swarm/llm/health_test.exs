@@ -21,7 +21,8 @@ defmodule JidoSwarm.LLM.HealthTest do
 
   test "the console reads providers without touching the network" do
     {us, providers} = :timer.tc(fn -> JidoSwarm.LLM.providers() end)
-    assert Enum.map(providers, & &1.name) == ["Ollama", "Anthropic"]
+    assert Enum.map(providers, & &1.name) == ["Ragentic", "Ollama", "Anthropic"]
+    assert Enum.all?(providers, &is_list(&1.models))
     # Well under the five seconds an unreachable Ollama used to cost.
     assert us < 100_000
   end

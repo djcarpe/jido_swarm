@@ -10,15 +10,23 @@ defmodule JidoSwarm.LLM do
 
   | Module | Backing |
   |---|---|
-  | `JidoSwarm.LLM.Ollama` | the local Ollama server, over its OpenAI-compatible `/v1` API |
+  | `JidoSwarm.LLM.Ragentic` | ragentic's model gateway: every provider registered there (relayed laptops, DeepSeek, OpenAI, Anthropic…), as `PROVIDER/MODEL` |
+  | `JidoSwarm.LLM.Ollama` | the local Ollama server, over its native `/api/chat` |
   | `JidoSwarm.LLM.Anthropic` | the Claude Messages API |
 
-  Selected per call or from config:
+  Selected per call or from config; a job may name its `model` and the
+  provider serves that one:
 
       config :jido_swarm, JidoSwarm.LLM,
-        provider: JidoSwarm.LLM.Ollama,
+        provider: JidoSwarm.LLM.Ragentic,
+        ragentic: [base_url: "https://ragentic.home", token: "…", model: "dj-laptop/qwen3:4b-instruct"],
         ollama: [base_url: "http://127.0.0.1:11434", model: "qwen3:4b-instruct"],
         anthropic: [api_key: nil, model: "claude-opus-5"]
+
+  The registry of what can be used is whatever ragentic has registered right
+  now (`providers/0` carries each provider's model list from the last
+  background probe), so a provider added there is usable here without a
+  restart.
 
   ## Messages
 
@@ -98,6 +106,14 @@ defmodule JidoSwarm.LLM do
   @doc "A human-readable note on why the provider is not ready."
   @callback readiness_hint() :: String.t()
 
+  @doc "The models the provider can serve right now, for the registry."
+  @callback models() :: {:ok, [String.t()]} | {:error, term()}
+
+  @doc "The provider's configured default model."
+  @callback model() :: String.t() | nil
+
+  @optional_callbacks models: 0, model: 0
+
   @doc """
   Sends a conversation to the configured provider.
   """
@@ -132,7 +148,14 @@ defmodule JidoSwarm.LLM do
   why the other one is not available.
   """
   @spec providers() :: [
-          %{module: module(), name: String.t(), ready?: boolean(), hint: String.t()}
+          %{
+            module: module(),
+            name: String.t(),
+            ready?: boolean(),
+            hint: String.t(),
+            active?: boolean(),
+            models: [String.t()]
+          }
         ]
   def providers do
     for mod <- provider_modules() do
@@ -142,6 +165,7 @@ defmodule JidoSwarm.LLM do
         # From the last background probe, never a round trip: this is read on
         # every console mount (see `JidoSwarm.LLM.Health`).
         ready?: JidoSwarm.LLM.Health.ready?(mod),
+        models: JidoSwarm.LLM.Health.models(mod),
         hint: mod.readiness_hint(),
         active?: mod == provider()
       }
@@ -150,7 +174,23 @@ defmodule JidoSwarm.LLM do
 
   @doc "Every provider module, in the order the console lists them."
   @spec provider_modules() :: [module()]
-  def provider_modules, do: [JidoSwarm.LLM.Ollama, JidoSwarm.LLM.Anthropic]
+  def provider_modules,
+    do: [JidoSwarm.LLM.Ragentic, JidoSwarm.LLM.Ollama, JidoSwarm.LLM.Anthropic]
+
+  @doc "The model a provider answers with when a job names none."
+  @spec active_model(module()) :: String.t() | nil
+  def active_model(provider \\ provider()) do
+    cond do
+      Code.ensure_loaded?(provider) and function_exported?(provider, :model, 0) ->
+        provider.model()
+
+      provider == JidoSwarm.LLM.Anthropic ->
+        provider_config(:anthropic)[:model]
+
+      true ->
+        nil
+    end
+  end
 
   @doc """
   Builds a normalized assistant message from a result, ready to append to the

@@ -31,18 +31,29 @@ defmodule JidoSwarm.LLM.Health do
   @spec ready?(module()) :: boolean()
   def ready?(provider) do
     case :ets.lookup(@table, provider) do
-      [{^provider, ready?, _at}] -> ready?
+      [{^provider, ready?, _at, _models}] -> ready?
       [] -> false
     end
   rescue
     ArgumentError -> false
   end
 
+  @doc "The models `provider` listed at its last probe (those that list any), or []."
+  @spec models(module()) :: [String.t()]
+  def models(provider) do
+    case :ets.lookup(@table, provider) do
+      [{^provider, _ready?, _at, models}] -> models
+      [] -> []
+    end
+  rescue
+    ArgumentError -> []
+  end
+
   @doc "When `provider` was last probed, in ms since the epoch, or nil."
   @spec probed_at(module()) :: integer() | nil
   def probed_at(provider) do
     case :ets.lookup(@table, provider) do
-      [{^provider, _ready?, at}] -> at
+      [{^provider, _ready?, at, _models}] -> at
       [] -> nil
     end
   rescue
@@ -76,18 +87,26 @@ defmodule JidoSwarm.LLM.Health do
   end
 
   # Providers are probed side by side, so one that hangs does not delay the
-  # others; each answer lands in the table as it arrives.
+  # others; each answer lands in the table as it arrives. A provider that can
+  # list its models (the ragentic gateway) is asked at the same time, so the
+  # registry the console shows is as fresh as its readiness.
   defp probe(providers) do
     providers
     |> Task.async_stream(
-      fn mod -> {mod, safe_ready?(mod)} end,
+      fn mod ->
+        ready? = safe_ready?(mod)
+        {mod, ready?, if(ready?, do: safe_models(mod), else: [])}
+      end,
       timeout: 15_000,
       on_timeout: :kill_task,
       ordered: false
     )
     |> Enum.each(fn
-      {:ok, {mod, ready?}} -> :ets.insert(@table, {mod, ready?, System.system_time(:millisecond)})
-      {:exit, _} -> :ok
+      {:ok, {mod, ready?, models}} ->
+        :ets.insert(@table, {mod, ready?, System.system_time(:millisecond), models})
+
+      {:exit, _} ->
+        :ok
     end)
   end
 
@@ -97,5 +116,18 @@ defmodule JidoSwarm.LLM.Health do
     e ->
       Logger.debug("llm health: #{inspect(mod)} readiness raised #{Exception.message(e)}")
       false
+  end
+
+  defp safe_models(mod) do
+    if function_exported?(mod, :models, 0) do
+      case mod.models() do
+        {:ok, models} when is_list(models) -> models
+        _ -> []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
   end
 end

@@ -18,7 +18,13 @@ defmodule JidoSwarm.Actions.Chat do
     schema: [
       prompt: [type: :string, required: true],
       worker: [type: :string, default: "unknown"],
-      job_id: [type: :string, default: "", doc: "Correlates the result with the dispatched job"]
+      job_id: [type: :string, default: "", doc: "Correlates the result with the dispatched job"],
+      model: [
+        type: :string,
+        default: "",
+        doc:
+          "The model for this turn (PROVIDER/MODEL on ragentic); the provider's default when empty"
+      ]
     ]
 
   alias JidoSwarm.Knowledge
@@ -38,7 +44,7 @@ defmodule JidoSwarm.Actions.Chat do
       %{role: :user, content: user_prompt(graph, params.prompt)}
     ]
 
-    case LLM.chat(messages, max_tokens: 2_000) do
+    case LLM.chat(messages, [max_tokens: 2_000] ++ JidoSwarm.Actions.model_opt(params)) do
       {:ok, result} ->
         answer = String.trim(result.text)
 

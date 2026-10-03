@@ -38,4 +38,17 @@ defmodule JidoSwarm.Actions do
         {:ok, Map.merge(base, %{outcome: :error, error: inspect(reason)})}
     end
   end
+
+  @doc """
+  The `model:` option for a job's LLM calls: the model the job named, or
+  nothing, so the provider's default answers. Actions take `model` as a
+  string that defaults to "" (a schema cannot say "absent").
+  """
+  @spec model_opt(map()) :: keyword()
+  def model_opt(params) do
+    case Map.get(params, :model) do
+      m when is_binary(m) and m != "" -> [model: m]
+      _ -> []
+    end
+  end
 end

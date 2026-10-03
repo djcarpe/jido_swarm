@@ -17,6 +17,9 @@ defmodule JidoSwarm.Job do
   `:chat` carries a `reply_to` pid so the LiveView that asked gets the answer
   directly; the other types report only into the graph, and the UI reacts to the
   mesh.
+
+  A job may name its `model` (`PROVIDER/MODEL` on the ragentic gateway, a tag
+  on Ollama, an id on Anthropic); without one the provider's default answers.
   """
 
   @enforce_keys [:id, :type]
@@ -29,6 +32,7 @@ defmodule JidoSwarm.Job do
     :reply_to,
     :worker,
     :error,
+    :model,
     status: :pending,
     payload: %{},
     enqueued_at: nil,
@@ -48,6 +52,7 @@ defmodule JidoSwarm.Job do
           reply_to: pid() | nil,
           worker: String.t() | nil,
           error: term(),
+          model: String.t() | nil,
           status: status(),
           payload: map(),
           enqueued_at: integer() | nil,
@@ -65,6 +70,7 @@ defmodule JidoSwarm.Job do
       proposal_key: opts[:proposal_key],
       prompt: opts[:prompt],
       reply_to: opts[:reply_to],
+      model: opts[:model],
       payload: opts[:payload] || %{},
       enqueued_at: System.system_time(:millisecond)
     }

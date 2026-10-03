@@ -34,7 +34,13 @@ defmodule JidoSwarm.Actions.HiveWork do
       task: [type: :string, required: true],
       context: [type: :string, default: ""],
       worker: [type: :string, default: "unknown"],
-      job_id: [type: :string, default: ""]
+      job_id: [type: :string, default: ""],
+      model: [
+        type: :string,
+        default: "",
+        doc:
+          "The model for this task (PROVIDER/MODEL on ragentic); the provider's default when empty"
+      ]
     ]
 
   alias JidoSwarm.Hive
@@ -63,17 +69,18 @@ defmodule JidoSwarm.Actions.HiveWork do
     repos = repos_for(task, context) |> Enum.filter(&cloned?/1)
     messages = Reasoning.prompt(prompt(context, repos))
 
+    model = JidoSwarm.Actions.model_opt(params)
+
     ask =
       if repos == [] do
-        Reasoning.ask_json(messages, :object, max_tokens: @max_tokens)
+        Reasoning.ask_json(messages, :object, [max_tokens: @max_tokens] ++ model)
       else
         Reasoning.ask_json_with_tools(
           messages,
           :object,
           Repos.Tools.definitions(),
           &Repos.Tools.call(&1, &2, repos),
-          max_tokens: @max_tokens,
-          max_rounds: @tool_rounds
+          [max_tokens: @max_tokens, max_rounds: @tool_rounds] ++ model
         )
       end
 

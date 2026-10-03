@@ -71,6 +71,14 @@ config :jido_action, default_timeout: 900_000
 # local model — the prompts are provider-neutral, so nothing else changes.
 config :jido_swarm, JidoSwarm.LLM,
   provider: JidoSwarm.LLM.Anthropic,
+  # ragentic's gateway: every provider registered there, as PROVIDER/MODEL.
+  # Filled from RAGENTIC_URL / RAGENTIC_TOKEN / RAGENTIC_MODEL at runtime.
+  ragentic: [
+    base_url: nil,
+    token: nil,
+    model: nil,
+    timeout: 300_000
+  ],
   ollama: [
     base_url: "http://127.0.0.1:11434",
     model: "qwen3:4b-instruct",

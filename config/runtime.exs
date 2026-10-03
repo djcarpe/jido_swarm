@@ -45,9 +45,11 @@ end
 # work when running from a checkout and from the release in Kubernetes.
 # ---------------------------------------------------------------------------
 
-# The model. Claude by default; LLM_PROVIDER=ollama switches to the local one.
+# The model. Claude by default; LLM_PROVIDER=ollama switches to the local
+# one, LLM_PROVIDER=ragentic to ragentic's gateway and everything registered there.
 llm_provider =
   case System.get_env("LLM_PROVIDER", "anthropic") do
+    "ragentic" -> JidoSwarm.LLM.Ragentic
     "ollama" -> JidoSwarm.LLM.Ollama
     "local" -> JidoSwarm.LLM.Ollama
     _ -> JidoSwarm.LLM.Anthropic
@@ -55,6 +57,16 @@ llm_provider =
 
 config :jido_swarm, JidoSwarm.LLM,
   provider: llm_provider,
+  ragentic: [
+    base_url: System.get_env("RAGENTIC_URL"),
+    # an API key with the api scope (API keys in the ragentic web app)
+    token: System.get_env("RAGENTIC_TOKEN"),
+    # PROVIDER/MODEL as `ragentic model ls` lists them
+    model: System.get_env("RAGENTIC_MODEL"),
+    # the server's private CA, when it is not the cluster-internal URL
+    cacert: System.get_env("RAGENTIC_CACERT"),
+    timeout: String.to_integer(System.get_env("RAGENTIC_TIMEOUT_MS", "300000"))
+  ],
   ollama: [
     base_url: System.get_env("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
     model: System.get_env("OLLAMA_MODEL", "qwen3:4b-instruct"),

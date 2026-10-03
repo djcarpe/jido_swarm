@@ -191,8 +191,10 @@ defmodule JidoSwarm.Swarm.Worker do
   defp worker_skills,
     do: Application.get_env(:jido_swarm, :worker_skills, ~w(elixir research design writing))
 
+  # What the Hive shows next to this worker: the active provider's model,
+  # whichever provider that is.
   defp model do
-    case JidoSwarm.LLM.provider_config(:anthropic)[:model] do
+    case JidoSwarm.LLM.active_model() do
       nil -> ""
       m -> to_string(m)
     end
@@ -280,19 +282,23 @@ defmodule JidoSwarm.Swarm.Worker do
   end
 
   defp signal_for(%Job{type: :chat} = job, worker) do
-    signal("swarm.chat", %{prompt: job.prompt, worker: worker, job_id: job.id})
+    signal("swarm.chat", with_model(%{prompt: job.prompt, worker: worker, job_id: job.id}, job))
   end
 
   defp signal_for(%Job{type: :hive, payload: p} = job, worker) do
-    signal("swarm.hive", %{
-      task: p.task,
-      context: p[:context] || "",
-      worker: worker,
-      job_id: job.id
-    })
+    signal(
+      "swarm.hive",
+      with_model(%{task: p.task, context: p[:context] || "", worker: worker, job_id: job.id}, job)
+    )
   end
 
   defp signal(type, data), do: Signal.new!(type, data, source: "/swarm/worker")
+
+  # Only a job that names a model says so; the action's schema fills the rest.
+  defp with_model(data, %Job{model: model}) when is_binary(model) and model != "",
+    do: Map.put(data, :model, model)
+
+  defp with_model(data, _job), do: data
 
   # Implementation runs a full test suite; the others are one model call.
   defp job_timeout(%Job{type: :implement}), do: 900_000

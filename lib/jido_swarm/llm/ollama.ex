@@ -64,6 +64,7 @@ defmodule JidoSwarm.LLM.Ollama do
 
   @doc "Models the server currently has pulled."
   @spec models() :: {:ok, [String.t()]} | {:error, term()}
+  @impl true
   def models do
     case Req.get(url("/api/tags"), receive_timeout: 10_000) do
       {:ok, %{status: 200, body: %{"models" => models}}} ->
@@ -238,6 +239,7 @@ defmodule JidoSwarm.LLM.Ollama do
 
   @doc "The configured default model."
   @spec model() :: String.t()
+  @impl true
   def model do
     JidoSwarm.LLM.provider_config(:ollama) |> Keyword.get(:model, @default_model)
   end

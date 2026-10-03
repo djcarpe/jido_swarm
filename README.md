@@ -45,6 +45,20 @@ ollama pull qwen3:4b-instruct
 LLM_PROVIDER=ollama mix phx.server
 ```
 
+Or at everything registered in [ragentic](../ragentic) — relayed laptops,
+DeepSeek, OpenAI, Anthropic, whatever its `ModelProvider` manifests name —
+through its OpenAI-compatible gateway, with the credentials kept there:
+
+```sh
+LLM_PROVIDER=ragentic RAGENTIC_URL=https://ragentic.home RAGENTIC_TOKEN=ragentic_... \
+  RAGENTIC_MODEL=dj-laptop/qwen3:4b-instruct RAGENTIC_CACERT=~/.config/ragentic/homelab-root-ca.pem \
+  mix phx.server
+```
+
+`ragentic model ls` (or `GET /v1/models`) lists the `PROVIDER/MODEL` names; a
+provider registered in ragentic later is usable here without a restart, and a
+job may name its own `model`.
+
 ## The Hive: a self-organising swarm, and MCP
 
 Besides the queue, the swarm can run with **no dispatcher at all**: goals,
@@ -80,7 +94,7 @@ last-writer-wins rule settles in front of you.
 | `JidoSwarm.Swarm.Autoscaler` | adds workers on backlog, retires them when idle |
 | `JidoSwarm.Swarm.Worker` | a pull loop around one `Jido.AgentServer` |
 | `JidoSwarm.Knowledge` | the shared graph's schema, over `Jido.Context` |
-| `JidoSwarm.LLM` | the model — local Ollama, or Claude |
+| `JidoSwarm.LLM` | the model — ragentic's gateway (every provider registered there), local Ollama, or Claude |
 | `JidoSwarm.Repos` | the repositories, cloning, branching, testing, PRs |
 | `JidoSwarmWeb.ChatLive` | the operator's view of all of it |
 | `JidoSwarm.Hive` | the self-organising board: goals, tasks, leases, shared memory, context packs |
@@ -97,6 +111,7 @@ at the edge, so switching changes nothing but the answers' quality.
 | `ANTHROPIC_API_KEY` | required |
 | `ANTHROPIC_WORKSPACE_ID` | only for an **organization-scoped** key |
 | `LLM_PROVIDER=ollama` | use the local model instead |
+| `LLM_PROVIDER=ragentic` | use ragentic's gateway: `RAGENTIC_URL`, `RAGENTIC_TOKEN` (an API key with the api scope), `RAGENTIC_MODEL` (`PROVIDER/MODEL`), `RAGENTIC_CACERT` for a private CA |
 
 > **An org-scoped key needs a workspace.** Anthropic rejects every request from
 > one with `invalid_request_error` until it is told which workspace to bill,
